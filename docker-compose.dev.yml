@@ -1,0 +1,65 @@
+# Development Docker Compose - ONLY the Agent
+# Backend and Frontend run locally for faster development
+
+services:
+  # Documentation Agent (needs Docker for security isolation)
+  doc-agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: doc-agent
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key  # Docker secrets support
+      LLM_MODEL: openrouter/anthropic/claude-3.5-sonnet
+      LLM_API_KEY: ${OPENROUTER_API_KEY}
+      LLM_BASE_URL: https://openrouter.ai/api/v1
+      SANDBOX_TYPE: local
+      # Point to localhost since backend runs locally
+      DOC_API_URL: http://host.docker.internal:8000
+    volumes:
+      # SECURITY: Read-only agent code
+      - ./agent:/workspace:ro
+      # SECURITY: Read-write repos with security options
+      - ./repos:/repos:rw,nosuid,nodev
+    # SECURITY: Read-only root filesystem (agent shouldn't write to system)
+    read_only: false  # OpenHands needs write access to /tmp
+    tmpfs:
+      # SECURITY: Temp directory with no-exec, size limit
+      - /tmp:rw,noexec,nosuid,size=1g
+    working_dir: /workspace
+    command: tail -f /dev/null
+    restart: unless-stopped
+
+    # SECURITY: Remove privileged mode
+    privileged: false
+
+    # SECURITY: Drop all capabilities, add only needed ones
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN         # For git operations
+      - DAC_OVERRIDE  # For file access
+
+    # SECURITY: Prevent privilege escalation
+    security_opt:
+      - no-new-privileges:true
+
+    # SECURITY: Resource limits
+    mem_limit: 4g
+    memswap_limit: 4g
+    pids_limit: 200
+
+    # Allow access to host network for connecting to local backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  default:
+    name: autodoc-network
+
+# SECURITY: Docker secrets for sensitive credentials
+# Uncomment to use secrets in production (requires creating secrets/openrouter_api_key.txt)
+# secrets:
+#   openrouter_api_key:
+#     file: ./secrets/openrouter_api_key.txt

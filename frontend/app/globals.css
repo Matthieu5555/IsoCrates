@@ -1,0 +1,282 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* reactflow base styles — imported globally because Next.js does not allow
+   CSS imports from node_modules inside client components with the App Router. */
+@import '@xyflow/react/dist/style.css';
+
+@layer base {
+  :root {
+    /* Light mode - greyish background */
+    --background: 210 20% 97%;
+    --foreground: 225 51% 17%;
+
+    --muted: 210 20% 92%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --border: 214.3 31.8% 88%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 20% 94%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --accent: 210 30% 90%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --link: 217 91% 60%;
+    --link-hover: 217 91% 50%;
+  }
+
+  .dark {
+    /* Dark mode - #151F41 (21, 31, 65 in RGB) */
+    --background: 225 51% 17%;
+    --foreground: 210 40% 98%;
+
+    --muted: 225 45% 22%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --border: 225 40% 25%;
+    --input: 225 45% 22%;
+    --ring: 212.7 26.8% 83.9%;
+
+    --primary: 210 40% 98%;
+    --primary-foreground: 225 51% 17%;
+
+    --secondary: 225 45% 22%;
+    --secondary-foreground: 210 40% 98%;
+
+    --accent: 225 45% 25%;
+    --accent-foreground: 210 40% 98%;
+
+    --link: 217 91% 70%;
+    --link-hover: 217 91% 80%;
+  }
+
+  .custom {
+    /* Base values - overridden by JS with user's custom colors */
+    --background: 210 20% 97%;
+    --foreground: 225 51% 17%;
+
+    --muted: 210 20% 92%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --border: 214.3 31.8% 88%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 20% 94%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --accent: 210 30% 90%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --link: 217 91% 60%;
+    --link-hover: 217 91% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Enhanced prose styling for markdown */
+.prose {
+  @apply text-foreground;
+}
+
+.prose h1 {
+  @apply text-4xl font-bold mb-6 mt-8 text-foreground;
+}
+
+.prose h2 {
+  @apply text-3xl font-semibold mb-4 mt-7 text-foreground border-b border-border pb-2;
+}
+
+.prose h3 {
+  @apply text-2xl font-semibold mb-3 mt-6 text-foreground;
+}
+
+.prose h4 {
+  @apply text-xl font-semibold mb-2 mt-5 text-foreground;
+}
+
+.prose h5 {
+  @apply text-lg font-semibold mb-2 mt-4 text-foreground;
+}
+
+.prose h6 {
+  @apply text-base font-semibold mb-2 mt-4 text-foreground;
+}
+
+.prose p {
+  @apply mb-4 leading-7 text-foreground;
+}
+
+.prose ul, .prose ol {
+  @apply mb-4 ml-6 space-y-2;
+}
+
+.prose ul {
+  @apply list-disc;
+}
+
+.prose ol {
+  @apply list-decimal;
+}
+
+.prose li {
+  @apply leading-7;
+}
+
+.prose a {
+  @apply text-link underline hover:text-link-hover transition-colors;
+}
+
+.prose strong {
+  @apply font-semibold text-foreground;
+}
+
+.prose em {
+  @apply italic;
+}
+
+.prose blockquote {
+  @apply border-l-4 border-border pl-4 italic my-4 text-muted-foreground;
+}
+
+.prose table {
+  @apply w-full border-collapse my-4;
+  /* Prevent table from breaking layout */
+  display: table;
+  min-width: 100%;
+}
+
+/* Table container for horizontal scrolling on mobile */
+.prose .table-wrapper {
+  @apply overflow-x-auto my-4 -mx-4 px-4;
+}
+
+.prose th {
+  @apply border border-border bg-muted px-4 py-2 text-left font-semibold;
+  /* Prevent header text from wrapping too early */
+  white-space: nowrap;
+}
+
+.prose td {
+  @apply border border-border px-4 py-2;
+}
+
+.prose hr {
+  @apply my-8 border-border;
+}
+
+.prose img {
+  @apply max-w-full h-auto rounded-lg my-4;
+}
+
+/* Code highlighting with enhanced scrolling */
+pre {
+  @apply bg-muted rounded-lg p-4 overflow-x-auto my-4 max-w-full;
+  /* Prevent code blocks from breaking layout */
+  word-wrap: normal;
+  white-space: pre;
+}
+
+code {
+  @apply bg-muted px-1.5 py-0.5 rounded text-sm;
+}
+
+pre code {
+  @apply bg-transparent p-0;
+  /* Ensure long lines scroll instead of wrap */
+  display: block;
+  overflow-x: auto;
+}
+
+/* Command Menu (cmdk) animations */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-in {
+  animation: fade-in 0.2s ease-in;
+}
+
+/* Smooth scroll behavior */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Global scrollbar styling for all scrollable containers */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted)) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted));
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+  background-clip: padding-box;
+}
+
+/* Horizontal scrollbar for code blocks and tables */
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Command Menu scrollbar styling (specific overrides if needed) */
+[cmdk-list] {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted)) transparent;
+}
+
+[cmdk-list]::-webkit-scrollbar {
+  width: 8px;
+}
+
+[cmdk-list]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[cmdk-list]::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted));
+  border-radius: 4px;
+}
+
+[cmdk-list]::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+}

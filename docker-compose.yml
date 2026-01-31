@@ -1,0 +1,124 @@
+services:
+  # Backend API (FastAPI)
+  backend-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: backend-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./silverbullet_era/notes:/notes  # Access to legacy notes for migration
+    environment:
+      DATABASE_URL: sqlite:////app/alto_isocrates.db
+      CORS_ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001"
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-insecure-key-change-me}
+      AUTH_ENABLED: ${AUTH_ENABLED:-false}
+      LOG_LEVEL: INFO
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    restart: unless-stopped
+
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_BASE_PATH: /IsoCrates
+    container_name: frontend
+    ports:
+      - "3001:3001"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL_INTERNAL: http://backend-api:8000
+      NEXT_PUBLIC_API_TOKEN: ${DOC_API_TOKEN:-}
+      PORT: 3001
+    depends_on:
+      - backend-api
+    restart: unless-stopped
+
+  # Documentation Agent (analyzes repos with OpenHands + Claude)
+  doc-agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: doc-agent
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key  # Docker secrets support
+      LLM_MODEL: openrouter/anthropic/claude-3.5-sonnet
+      LLM_API_KEY: ${OPENROUTER_API_KEY}
+      LLM_BASE_URL: https://openrouter.ai/api/v1
+      SANDBOX_TYPE: local
+      DOC_API_URL: http://backend-api:8000
+      DOC_API_TOKEN: ${DOC_API_TOKEN:-}
+    volumes:
+      # SECURITY: Read-only agent code
+      - ./agent:/workspace:ro
+      # SECURITY: Read-write repos with security options
+      - ./repos:/repos:rw,nosuid,nodev
+    # SECURITY: Read-only root filesystem (agent shouldn't write to system)
+    read_only: false  # OpenHands needs write access to /tmp
+    tmpfs:
+      # SECURITY: Temp directory with no-exec, size limit
+      - /tmp:rw,noexec,nosuid,size=1g
+    working_dir: /workspace
+    depends_on:
+      - backend-api
+    command: tail -f /dev/null
+    restart: unless-stopped
+
+    # SECURITY: Remove privileged mode
+    privileged: false
+
+    # SECURITY: Drop all capabilities, add only needed ones
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN         # For git operations
+      - DAC_OVERRIDE  # For file access
+
+    # SECURITY: Prevent privilege escalation
+    security_opt:
+      - no-new-privileges:true
+
+    # SECURITY: Resource limits
+    mem_limit: 4g
+    memswap_limit: 4g
+    pids_limit: 200
+
+    # SECURITY: Use non-root user (requires Dockerfile update)
+    # user: "1000:1000"
+
+  # Worker: polls for queued generation jobs and runs the agent
+  doc-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: doc-worker
+    environment:
+      DATABASE_URL: sqlite:////app/alto_isocrates.db
+      AGENT_SCRIPT_PATH: /workspace/openhands_doc.py
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      DOC_API_URL: http://backend-api:8000
+    volumes:
+      - ./backend:/app
+      - ./agent:/workspace:ro
+      - ./repos:/repos:rw,nosuid,nodev
+    working_dir: /app
+    command: python worker.py
+    depends_on:
+      - backend-api
+    restart: unless-stopped
+
+networks:
+  default:
+    name: autodoc-network
+
+# SECURITY: Docker secrets for sensitive credentials
+# Uncomment to use secrets in production (requires creating secrets/openrouter_api_key.txt)
+# secrets:
+#   openrouter_api_key:
+#     file: ./secrets/openrouter_api_key.txt
