@@ -9,11 +9,14 @@ from openhands.tools.terminal import TerminalTool
 
 load_dotenv()
 
-# Configure LLM
+# Configure LLM (uses env vars: LLM_BASE_URL, LLM_API_KEY, etc.)
+llm_kwargs = {"base_url": os.getenv("LLM_BASE_URL")}
+api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+if api_key:
+    llm_kwargs["api_key"] = api_key
 llm = LLM(
-    model="anthropic/claude-3.5-sonnet",
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
+    model=os.getenv("SCOUT_MODEL"),
+    **llm_kwargs,
 )
 
 # Create agent

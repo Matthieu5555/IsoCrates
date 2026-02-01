@@ -61,20 +61,7 @@ class TestBrokenLinks:
         assert links[0]["resolved"] is True
 
     def test_broken_links_with_unresolved(self, client):
-        """Wikilink to nonexistent target is reported as unresolved.
-
-        Note: _resolve_wikilink falls back to content search, so a wikilink
-        target that appears in ANY document's content will resolve (even to
-        the doc containing it). We test with a target whose text won't appear
-        literally in any document content by using a very short unique token.
-        """
-        # Create a doc whose content does NOT contain the wikilink target text
-        # (the [[...]] syntax itself contains it, but _extract_wikilinks strips brackets)
-        # The search fallback searches content with .contains(), and the content
-        # "See [[xq9]] here." contains "xq9", so the doc self-resolves.
-        # This means truly broken links only occur when no doc's content matches either.
-        # To test this properly, we check the endpoint returns results and verify
-        # the structure, accepting the search fallback behavior.
+        """Wikilink to nonexistent target is reported as unresolved."""
         doc = make_document(
             title="Has Links", path="broken-test",
             content="See [[xq9]] here.",
@@ -87,10 +74,8 @@ class TestBrokenLinks:
         links = resp.json()
         assert len(links) == 1
         assert links[0]["target"] == "xq9"
-        # Due to content-search fallback, this resolves to the doc itself.
-        # This is a known limitation of _resolve_wikilink's aggressive fallback.
-        assert "resolved" in links[0]
-        assert "resolved_doc_id" in links[0]
+        assert links[0]["resolved"] is False
+        assert links[0]["resolved_doc_id"] is None
 
     def test_broken_links_empty_for_no_wikilinks(self, client):
         """Document with no wikilinks returns empty list."""
@@ -121,8 +106,8 @@ class TestWikilinkResolution:
 
 class TestCircularDependencies:
 
-    def test_circular_dependency_rejected(self, client):
-        """Creating A→B then B→A should be rejected."""
+    def test_wikilink_circular_dependency_allowed(self, client):
+        """Wikilinks are cross-references — A→B then B→A should be allowed."""
         a_id = client.post("/api/docs", json=make_document(title="A", path="crate/a")).json()["id"]
         b_id = client.post("/api/docs", json=make_document(title="B", path="crate/b")).json()["id"]
 
@@ -133,10 +118,27 @@ class TestCircularDependencies:
         )
         assert resp.status_code == 201
 
-        # Try B→A — should be rejected
+        # B→A should be allowed for wikilinks
         resp = client.post(
             f"/api/docs/{b_id}/dependencies",
             json={"from_doc_id": b_id, "to_doc_id": a_id, "link_type": "wikilink"},
+        )
+        assert resp.status_code == 201
+
+    def test_non_wikilink_circular_dependency_rejected(self, client):
+        """Non-wikilink dependency types still reject cycles."""
+        a_id = client.post("/api/docs", json=make_document(title="CycA", path="crate/ca")).json()["id"]
+        b_id = client.post("/api/docs", json=make_document(title="CycB", path="crate/cb")).json()["id"]
+
+        resp = client.post(
+            f"/api/docs/{a_id}/dependencies",
+            json={"from_doc_id": a_id, "to_doc_id": b_id, "link_type": "import"},
+        )
+        assert resp.status_code == 201
+
+        resp = client.post(
+            f"/api/docs/{b_id}/dependencies",
+            json={"from_doc_id": b_id, "to_doc_id": a_id, "link_type": "import"},
         )
         assert resp.status_code == 400
 

@@ -30,6 +30,17 @@
 
     --link: 217 91% 60%;
     --link-hover: 217 91% 50%;
+
+    /* ReactFlow overrides */
+    --xy-background-color: hsl(var(--background));
+    --xy-node-background-color: hsl(var(--background));
+    --xy-node-border-color: hsl(var(--border));
+    --xy-edge-stroke: hsl(var(--primary));
+    --xy-minimap-background-color: hsl(var(--muted));
+    --xy-minimap-mask-background-color: hsl(var(--background) / 0.7);
+    --xy-controls-button-background-color: hsl(var(--background));
+    --xy-controls-button-border-color: hsl(var(--border));
+    --xy-controls-button-color: hsl(var(--foreground));
   }
 
   .dark {
@@ -55,6 +66,17 @@
 
     --link: 217 91% 70%;
     --link-hover: 217 91% 80%;
+
+    /* ReactFlow overrides */
+    --xy-background-color: hsl(var(--background));
+    --xy-node-background-color: hsl(var(--background));
+    --xy-node-border-color: hsl(var(--border));
+    --xy-edge-stroke: hsl(var(--primary));
+    --xy-minimap-background-color: hsl(var(--muted));
+    --xy-minimap-mask-background-color: hsl(var(--background) / 0.7);
+    --xy-controls-button-background-color: hsl(var(--background));
+    --xy-controls-button-border-color: hsl(var(--border));
+    --xy-controls-button-color: hsl(var(--foreground));
   }
 
   .custom {
@@ -80,6 +102,17 @@
 
     --link: 217 91% 60%;
     --link-hover: 217 91% 50%;
+
+    /* ReactFlow overrides */
+    --xy-background-color: hsl(var(--background));
+    --xy-node-background-color: hsl(var(--background));
+    --xy-node-border-color: hsl(var(--border));
+    --xy-edge-stroke: hsl(var(--primary));
+    --xy-minimap-background-color: hsl(var(--muted));
+    --xy-minimap-mask-background-color: hsl(var(--background) / 0.7);
+    --xy-controls-button-background-color: hsl(var(--background));
+    --xy-controls-button-border-color: hsl(var(--border));
+    --xy-controls-button-color: hsl(var(--foreground));
   }
 }
 

@@ -100,7 +100,9 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Failed to render diagram');
+          const message = err instanceof Error ? err.message : 'Failed to render diagram';
+          console.warn('[MermaidBlock] Diagram render failed:', message);
+          setError(message);
         }
       }
     }
@@ -111,9 +113,8 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
 
   if (error) {
     return (
-      <div className="rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-4 text-sm text-red-600 dark:text-red-400">
-        <p className="font-medium mb-1">Mermaid diagram error</p>
-        <pre className="text-xs whitespace-pre-wrap">{error}</pre>
+      <div className="rounded-md border border-border bg-muted/50 p-3 text-xs text-muted-foreground">
+        <span>Diagram could not be rendered</span>
       </div>
     );
   }

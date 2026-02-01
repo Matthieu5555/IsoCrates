@@ -58,8 +58,8 @@ export function VersionHistory({ docId }: VersionHistoryProps) {
 
   if (error) {
     return (
-      <div className="text-sm text-red-500">
-        Failed to load versions: {error}
+      <div className="text-sm text-muted-foreground">
+        Could not load version history
       </div>
     );
   }

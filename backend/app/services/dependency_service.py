@@ -71,8 +71,9 @@ class DependencyService:
         if dependency.from_doc_id == dependency.to_doc_id:
             raise SelfDependencyError(dependency.from_doc_id)
 
-        # Validate no circular dependencies (would create cycle)
-        if self._would_create_cycle(dependency.from_doc_id, dependency.to_doc_id):
+        # Validate no circular dependencies for non-wikilink types.
+        # Wikilinks are cross-references (A↔B is valid), not build dependencies.
+        if dependency.link_type != "wikilink" and self._would_create_cycle(dependency.from_doc_id, dependency.to_doc_id):
             raise CircularDependencyError(dependency.from_doc_id, dependency.to_doc_id)
 
         # Check for existing dependency (idempotent)
@@ -150,10 +151,8 @@ class DependencyService:
             doc_id: Source document ID
             content: Document markdown content containing [[wikilinks]]
         """
-        # Delete existing outgoing dependencies for this document
-        existing_deps = self.dep_repo.get_by_source(doc_id)
-        for dep in existing_deps:
-            self.dep_repo.delete(dep.id)
+        # Delete existing outgoing dependencies for this document (single query)
+        self.dep_repo.delete_outgoing(doc_id)
 
         # Extract and resolve wikilinks
         wikilink_targets = self._extract_wikilinks(content)
@@ -182,31 +181,42 @@ class DependencyService:
         return set(matches)
 
     def _resolve_wikilink(self, target: str) -> Optional[str]:
-        """Resolve a wikilink target to a document ID."""
+        """Resolve a wikilink target to a document ID.
+
+        Uses exact title match, then case-insensitive title match, then
+        repo_name match. Partial/fuzzy matching was removed because it
+        created false-positive dependencies to unrelated documents.
+        """
         from sqlalchemy import func
         from ..models import Document
 
         active = Document.deleted_at.is_(None)
 
+        # Stage 1: Exact title match
         doc = self.db.query(Document).filter(active, Document.title == target).first()
         if doc:
             return doc.id
 
+        # Stage 2: Case-insensitive title match
         doc = self.db.query(Document).filter(
             active, func.lower(Document.title) == target.lower()
         ).first()
         if doc:
             return doc.id
 
+        # Stage 3: Exact repo_name match (wikilinks often reference repo names)
         doc = self.db.query(Document).filter(
-            active, func.lower(Document.title).contains(target.lower())
+            active, Document.repo_name == target
         ).first()
         if doc:
             return doc.id
 
-        results = self.doc_repo.search(target, limit=1)
-        if results:
-            return results[0].id
+        # Stage 4: Case-insensitive repo_name match
+        doc = self.db.query(Document).filter(
+            active, func.lower(Document.repo_name) == target.lower()
+        ).first()
+        if doc:
+            return doc.id
 
         return None
 

@@ -8,6 +8,7 @@ import { addDocumentRef } from '@/lib/api/personal';
 import type { DocumentListItem } from '@/types';
 import { dialogVariants, buttonVariants, inputVariants } from '@/lib/styles/button-variants';
 import { toast } from '@/lib/notifications/toast';
+import { getApiErrorMessage } from '@/lib/api/client';
 
 interface AddDocumentDialogProps {
   open: boolean;
@@ -64,7 +65,7 @@ export function AddDocumentDialog({
       toast.success('Added', `"${doc.title}" added to ${targetFolderName}`);
       onAdded();
     } catch (err) {
-      toast.error('Failed to add', (err as Error).message);
+      toast.error('Failed to add', getApiErrorMessage(err));
     } finally {
       setAdding(null);
     }

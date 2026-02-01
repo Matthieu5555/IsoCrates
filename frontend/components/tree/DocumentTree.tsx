@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Plus, FileText, Folder, FolderOpen, Layers, RefreshCw, Clock, Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { getTree, getTrash, deleteDocument, createDocument, moveFolder, moveDocument, createFolderMetadata, deleteFolder, type CreateDocumentData, type CreateFolderMetadataData } from '@/lib/api/documents';
-import { fetchApi } from '@/lib/api/client';
+import { fetchApi, getApiErrorMessage } from '@/lib/api/client';
 import type { TreeNode } from '@/types';
 import { ContextMenu } from './ContextMenu';
 import { NewDocumentDialog } from './dialogs/NewDocumentDialog';
@@ -172,7 +172,7 @@ export function DocumentTree() {
       setDeleteFolderDialogOpen(false);
       setSelectedNode(null);
     } catch (err) {
-      toast.error('Delete failed', (err as Error).message);
+      toast.error('Delete failed', getApiErrorMessage(err));
     }
   }
 
@@ -188,7 +188,7 @@ export function DocumentTree() {
       setDeleteConfirmOpen(false);
       setSelectedNode(null);
     } catch (err) {
-      toast.error('Delete failed', (err as Error).message);
+      toast.error('Delete failed', getApiErrorMessage(err));
     }
   }
 
@@ -218,7 +218,7 @@ export function DocumentTree() {
       router.push(`/docs/${newDoc.id}`);
       toast.success('Document created', `Created: ${data.title}`);
     } catch (err) {
-      toast.error('Create failed', (err as Error).message);
+      toast.error('Create failed', getApiErrorMessage(err));
     }
   }
 
@@ -339,7 +339,7 @@ export function DocumentTree() {
       }
       await loadTree();
     } catch (err) {
-      toast.error('Move failed', (err as Error).message);
+      toast.error('Move failed', getApiErrorMessage(err));
     } finally {
       setMovingFolder(false);
       setDraggedNode(null);
@@ -392,7 +392,7 @@ export function DocumentTree() {
         setExpandedNodes(prev => new Set([...Array.from(prev), targetNode.id]));
       }
     } catch (err) {
-      toast.error('Move failed', (err as Error).message);
+      toast.error('Move failed', getApiErrorMessage(err));
     } finally {
       setMovingFolder(false);
       setDraggedNode(null);
@@ -479,10 +479,10 @@ export function DocumentTree() {
               if (!entry) return null;
               const [, jobStatus] = entry;
               if (jobStatus.status === 'running') {
-                return <Loader2 className="h-3 w-3 text-blue-500 animate-spin" title="Generating..." />;
+                return <span title="Generating..."><Loader2 className="h-3 w-3 text-blue-500 animate-spin" /></span>;
               }
               if (jobStatus.status === 'queued') {
-                return <Clock className="h-3 w-3 text-amber-500" title="Queued for regeneration" />;
+                return <span title="Queued for regeneration"><Clock className="h-3 w-3 text-amber-500" /></span>;
               }
               if (jobStatus.status === 'completed' && jobStatus.completed_at) {
                 const date = new Date(jobStatus.completed_at);
@@ -493,7 +493,7 @@ export function DocumentTree() {
                 );
               }
               if (jobStatus.status === 'failed') {
-                return <XCircle className="h-3 w-3 text-red-500" title="Generation failed" />;
+                return <span title="Generation failed"><XCircle className="h-3 w-3 text-red-500" /></span>;
               }
               return null;
             })()}
@@ -523,7 +523,7 @@ export function DocumentTree() {
   if (error) {
     return (
       <div className="p-4">
-        <div className="text-sm text-red-600 mb-2">Error: {error}</div>
+        <div className="text-sm text-muted-foreground mb-2">Could not load documents</div>
         <button onClick={loadTree} className="text-sm text-primary hover:underline">
           Retry
         </button>

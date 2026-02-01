@@ -52,7 +52,7 @@ export function WikiLink({ target, children, broken }: WikiLinkProps) {
       className={`${linkVariants.default} cursor-pointer ${
         error || broken ? 'text-red-500 line-through decoration-red-500/50' : ''
       }`}
-      title={error || (broken ? `Broken link: ${target}` : `Link to: ${target}`)}
+      title={error || broken ? `Broken link: ${target}` : `Link to: ${target}`}
     >
       {children}
       {isResolving && ' ⏳'}

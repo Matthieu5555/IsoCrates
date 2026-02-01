@@ -145,16 +145,33 @@ def batch_operation(
     """
     service = DocumentService(db)
 
-    # Filter to only docs the user can edit
-    action = "delete" if batch.operation == "delete" else "edit"
-    allowed_ids = []
-    denied_ids = []
-    for doc_id in batch.doc_ids:
-        doc = service.get_document(doc_id)
-        if doc is not None and check_permission(auth.grants, doc.path, action):
-            allowed_ids.append(doc_id)
-        else:
-            denied_ids.append(doc_id)
+    # Service accounts (the doc agent) can delete AI-authored docs only.
+    # This avoids needing path-level grants for every doc the planner creates,
+    # while preventing the agent from touching human-authored content.
+    if auth.is_service_account and batch.operation == "delete":
+        allowed_ids = []
+        denied_ids = []
+        for doc_id in batch.doc_ids:
+            doc = service.get_document(doc_id)
+            if doc is None:
+                denied_ids.append(doc_id)
+                continue
+            latest = service.version_repo.get_latest(doc_id)
+            if latest and latest.author_type == "ai":
+                allowed_ids.append(doc_id)
+            else:
+                denied_ids.append(doc_id)
+    else:
+        # Normal user: check path-based permissions
+        action = "delete" if batch.operation == "delete" else "edit"
+        allowed_ids = []
+        denied_ids = []
+        for doc_id in batch.doc_ids:
+            doc = service.get_document(doc_id)
+            if doc is not None and check_permission(auth.grants, doc.path, action):
+                allowed_ids.append(doc_id)
+            else:
+                denied_ids.append(doc_id)
 
     result = service.execute_batch(batch.operation, allowed_ids, batch.params)
 

@@ -60,11 +60,35 @@ from security import RepositoryValidator, PathValidator
 # ---------------------------------------------------------------------------
 # Model Configuration
 # ---------------------------------------------------------------------------
-SCOUT_MODEL = os.getenv("SCOUT_MODEL", "openrouter/mistralai/devstral-2512")
-PLANNER_MODEL = os.getenv(
-    "PLANNER_MODEL", "openrouter/moonshotai/kimi-k2-thinking"
-)
-WRITER_MODEL = os.getenv("WRITER_MODEL", "openrouter/mistralai/devstral-2512")
+# Global defaults — override per-tier with SCOUT_BASE_URL, PLANNER_API_KEY, etc.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
+LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+LLM_NATIVE_TOOL_CALLING = os.getenv("LLM_NATIVE_TOOL_CALLING", "true").lower() == "true"
+
+SCOUT_MODEL = os.getenv("SCOUT_MODEL", "")
+PLANNER_MODEL = os.getenv("PLANNER_MODEL", "")
+WRITER_MODEL = os.getenv("WRITER_MODEL", "")
+
+
+def _resolve_api_key(tier: str) -> str | None:
+    """Resolve API key: tier-specific → global → Docker secrets."""
+    key = os.getenv(f"{tier}_API_KEY") or LLM_API_KEY
+    if not key:
+        key_file = os.getenv("OPENROUTER_API_KEY_FILE")
+        if key_file and os.path.exists(key_file):
+            with open(key_file) as f:
+                key = f.read().strip()
+    return key
+
+
+def _llm_kwargs(tier: str) -> dict:
+    """Build LLM constructor kwargs for a tier with fallback to globals."""
+    base_url = os.getenv(f"{tier}_BASE_URL") or LLM_BASE_URL
+    api_key = _resolve_api_key(tier)
+    kwargs = {"base_url": base_url}
+    if api_key:
+        kwargs["api_key"] = api_key
+    return kwargs
 
 # ---------------------------------------------------------------------------
 # Document Type Taxonomy (used for fallback and keyword tagging only —
@@ -80,6 +104,7 @@ DOCUMENT_TYPES = {
     "component": {"title": "Component", "keywords": ["Component", "Module"]},
     "data-model": {"title": "Data Model", "keywords": ["Data", "Schema", "Model"]},
     "contributing": {"title": "Contributing", "keywords": ["Contributing", "Development"]},
+    "capabilities": {"title": "Capabilities & User Stories", "keywords": ["Capabilities", "User Stories", "Features", "Use Cases"]},
 }
 
 COMPLEXITY_ORDER = {"small": 0, "medium": 1, "large": 2}
@@ -157,12 +182,12 @@ RULES:
   - DON'T over-link: same word linked twice in one paragraph is too much
   - DON'T dump links: a list of bare [[links]] with no prose is useless
 
-SEE ALSO SECTION:
-  End each page with a short "## See Also" section, but make it SELECTIVE.
-  Only list 3-5 pages that are genuinely the most relevant next reads —
-  not every page in the wiki. Write a brief reason for each:
-    "- [[Data Model]] — schema details for the entities discussed above"
-    "- [[Configuration]] — environment variables referenced in setup steps"
+DO NOT ADD A "SEE ALSO" SECTION. EVER.
+  No "## See Also", no "Related pages", no link dump at the bottom.
+  Every wikilink must be INLINE in prose where it's contextually relevant.
+  If a connection matters, it belongs in a sentence. If it doesn't fit
+  naturally in a sentence, it's not a real connection — don't force it.
+  The dependency graph must reflect genuine relationships, not padding.
 """
 
 
@@ -372,13 +397,13 @@ class OpenHandsDocGenerator:
     """
     Three-tier documentation generator.
 
-    Tier 0 (Scouts):   Devstral    — explore the repo, produce intelligence reports.
-    Tier 1 (Planner):  Kimi K2     — pure reasoning, designs doc architecture.
-    Tier 2 (Writers):  Devstral    — write each document from planner briefs.
+    Tier 0 (Scouts):   Explore the repo, produce intelligence reports.
+    Tier 1 (Planner):  Pure reasoning, designs doc architecture.
+    Tier 2 (Writers):  Write each document from planner briefs.
     """
 
     def __init__(self, repo_path: Path, repo_url: str, collection: str = ""):
-        self.repo_path = repo_path
+        self.repo_path = repo_path.resolve()
         self.repo_url = repo_url
         self.repo_name = repo_path.name
         self.collection = (
@@ -388,7 +413,7 @@ class OpenHandsDocGenerator:
         )
 
         # Configurable output directory
-        self.notes_dir = Path(os.getenv("NOTES_DIR", "/notes"))
+        self.notes_dir = Path(os.getenv("NOTES_DIR", "./notes")).resolve()
         self.notes_dir.mkdir(parents=True, exist_ok=True)
 
         # Registry & API client
@@ -398,24 +423,26 @@ class OpenHandsDocGenerator:
         # Load environment
         load_dotenv()
 
-        # Resolve API key (Docker secrets → env var)
-        api_key_file = os.getenv("OPENROUTER_API_KEY_FILE")
-        if api_key_file and os.path.exists(api_key_file):
-            with open(api_key_file) as f:
-                self.api_key = f.read().strip()
-        else:
-            self.api_key = os.getenv("OPENROUTER_API_KEY")
-
-        if not self.api_key:
+        # Validate required config
+        missing = [name for name, val in [
+            ("SCOUT_MODEL", SCOUT_MODEL),
+            ("PLANNER_MODEL", PLANNER_MODEL),
+            ("WRITER_MODEL", WRITER_MODEL),
+            ("LLM_BASE_URL", LLM_BASE_URL),
+        ] if not val]
+        if missing:
             raise ValueError(
-                "OPENROUTER_API_KEY not found (check environment or secrets file)"
+                f"Missing required LLM configuration: {', '.join(missing)}. "
+                "Set them in .env or as environment variables. See .env.example."
             )
 
-        # ---- Tier 0: Scout Agent (Devstral) ------------------------------
+        # ---- Tier 0: Scout Agent -------------------------------------------
+        scout_kwargs = _llm_kwargs("SCOUT")
         self.scout_llm = LLM(
             model=SCOUT_MODEL,
-            api_key=self.api_key,
-            base_url="https://openrouter.ai/api/v1",
+            native_tool_calling=LLM_NATIVE_TOOL_CALLING,
+            timeout=900,
+            **scout_kwargs,
         )
         self.scout_agent = Agent(
             llm=self.scout_llm,
@@ -425,18 +452,21 @@ class OpenHandsDocGenerator:
             ],
         )
 
-        # ---- Tier 1: Planner LLM (Kimi K2 — direct completion) ----------
+        # ---- Tier 1: Planner LLM (direct completion, no tools) ------------
         self.planner_llm = LLM(
             model=PLANNER_MODEL,
-            api_key=self.api_key,
-            base_url="https://openrouter.ai/api/v1",
+            timeout=900,
+            max_output_tokens=16384,
+            **_llm_kwargs("PLANNER"),
         )
 
-        # ---- Tier 2: Writer Agent (Devstral) -----------------------------
+        # ---- Tier 2: Writer Agent ------------------------------------------
+        writer_kwargs = _llm_kwargs("WRITER")
         self.writer_llm = LLM(
             model=WRITER_MODEL,
-            api_key=self.api_key,
-            base_url="https://openrouter.ai/api/v1",
+            native_tool_calling=LLM_NATIVE_TOOL_CALLING,
+            timeout=900,
+            **writer_kwargs,
         )
         self.writer_agent = Agent(
             llm=self.writer_llm,
@@ -448,12 +478,12 @@ class OpenHandsDocGenerator:
         )
 
         print("[Agent] Three-Tier Documentation Generator Configured:")
-        print(f"   Scouts:  {SCOUT_MODEL}")
-        print(f"   Planner: {PLANNER_MODEL}")
-        print(f"   Writer:  {WRITER_MODEL}")
+        print(f"   Scout:   {SCOUT_MODEL} @ {scout_kwargs.get('base_url')}")
+        print(f"   Planner: {PLANNER_MODEL} @ {_llm_kwargs('PLANNER').get('base_url')}")
+        print(f"   Writer:  {WRITER_MODEL} @ {writer_kwargs.get('base_url')}")
+        print(f"   Native tool calling: {LLM_NATIVE_TOOL_CALLING}")
         print(f"   Workspace: {self.repo_path}")
         print(f"   Output:    {self.notes_dir}")
-        print(f"   Registry:  ID-based document tracking enabled")
 
     # ------------------------------------------------------------------
     # Discovery
@@ -822,20 +852,48 @@ Think like a human who spent quality time organizing a knowledge base:
 - The structure feels like navigating a well-crafted wiki, not reading a PDF.
 
 FOLDER STRUCTURE:
-Use the path field to organize pages into folders. The base path is "{crate_path}".
-Example folder structure for a web app:
-  "{crate_path}"                          → Overview (index page)
-  "{crate_path}/getting-started"          → Quick Start
-  "{crate_path}/architecture"             → Architecture Overview
-  "{crate_path}/architecture/backend"     → Backend Architecture
-  "{crate_path}/architecture/frontend"    → Frontend Architecture
-  "{crate_path}/architecture/data-model"  → Data Model
-  "{crate_path}/api"                      → API Overview
-  "{crate_path}/api/authentication"       → Authentication
-  "{crate_path}/api/endpoints"            → Endpoints Reference
-  "{crate_path}/config"                   → Configuration
-  "{crate_path}/config/environment"       → Environment Variables
-  "{crate_path}/config/deployment"        → Deployment Guide
+Use the path field to organize pages. The base path is "{crate_path}".
+The path is the FOLDER the document lives in — a file named after the title
+will be created inside it.
+
+Rules:
+- Use folders to GROUP related documents (2+ docs per folder).
+- Standalone pages go directly in "{crate_path}" (no subfolder needed).
+- Max 2 levels deep. Never create a subfolder that holds only 1 document.
+
+GOOD example:
+  "{crate_path}"                    → Overview
+  "{crate_path}"                    → Getting Started
+  "{crate_path}"                    → Deployment
+  "{crate_path}/architecture"       → Architecture Overview
+  "{crate_path}/architecture"       → Backend Architecture
+  "{crate_path}/architecture"       → Frontend Architecture
+  "{crate_path}/architecture"       → Data Model
+  "{crate_path}/api"                → API Overview
+  "{crate_path}/api"                → Authentication
+  "{crate_path}/api"                → Endpoints Reference
+  "{crate_path}/config"             → Configuration
+  "{crate_path}/config"             → Environment Variables
+
+BAD (one subfolder per doc):
+  "{crate_path}/architecture/backend/backend-architecture"
+  "{crate_path}/features/wiki-links/wikilink-system"
+  "{crate_path}/deployment/docker/docker-deployment"
+
+MANDATORY PAGES (always include these, no exceptions):
+  1. "Overview" at "{crate_path}" — what the project is, key components, system diagram
+  2. "Getting Started" at "{crate_path}" — prerequisites, install, run in 5 minutes
+  3. "Capabilities & User Stories" at "{crate_path}" — business-facing document describing
+     what a user can DO with this tool. Written from the user's perspective, NOT the
+     developer's. Include:
+     - User stories in "As a [role], I can [action], so that [benefit]" format
+     - A functional capability matrix (feature → what it does → who it's for)
+     - End-to-end workflows a user would follow
+     - Client-facing descriptions suitable for product docs or onboarding material
+     This page should read like product documentation, not engineering docs.
+
+These three pages MUST appear first in the documents list. Every other page is up
+to your judgement based on the scout reports.
 
 PAGE COUNT GUIDELINES:
   - Small repos (< 10 source files): 5-8 pages
@@ -887,7 +945,7 @@ Output ONLY a valid JSON object (no markdown fences, no commentary).
     {{
       "doc_type": "component",
       "title": "Document Service",
-      "path": "{crate_path}/architecture/document-service",
+      "path": "{crate_path}/architecture",
       "rationale": "Focused page on one core service — keeps pages short",
       "sections": [
         {{
@@ -907,12 +965,21 @@ Output ONLY a valid JSON object (no markdown fences, no commentary).
   ]
 }}
 
+SPLITTING RULE — LARGE TOPICS MUST BE SPLIT:
+If a topic has more than ~5 distinct items (endpoints, services, config sections,
+models), it MUST be split into multiple pages. Examples:
+  - "API Reference" with 12 endpoints → split by resource: "Users API", "Documents API", "Auth API"
+  - "Architecture" covering frontend + backend + infra → split: "Backend Architecture", "Frontend Architecture", "Infrastructure"
+  - "Configuration" with 20+ env vars → split by concern: "Database Config", "Auth Config", "Deployment Config"
+ONE page should NEVER try to cover more than one resource group or domain.
+The parent/overview page links to the sub-pages with a brief summary table.
+
 CRITICAL RULES:
 - Create MANY small pages (see page count guidelines), NOT few large ones
 - Each page: 2-4 sections max. Keep it SHORT.
 - Every page must have wikilinks_out with 5-15 other page titles
 - Use nested paths for folder organization
-- doc_type is a loose tag (overview, architecture, api, component, guide, config, data-model, etc.)
+- doc_type is a loose tag (overview, architecture, api, component, guide, config, data-model, capabilities, etc.)
 - Output ONLY the JSON object
 """
 
@@ -993,24 +1060,26 @@ CRITICAL RULES:
              "sections": [
                  {"heading": "What is this project?", "rich_content": ["diagram:system overview"]},
                  {"heading": "Key Components", "rich_content": ["table:components"]},
-                 {"heading": "See Also", "rich_content": ["wikilinks:all pages"]},
+             ], "key_files_to_read": ["README.md"]},
+            {"doc_type": "capabilities", "title": "Capabilities & User Stories", "path": crate_path,
+             "sections": [
+                 {"heading": "User Stories", "rich_content": []},
+                 {"heading": "Feature Matrix", "rich_content": ["table:capabilities"]},
+                 {"heading": "Key Workflows", "rich_content": ["diagram:user workflows"]},
              ], "key_files_to_read": ["README.md"]},
             {"doc_type": "quickstart", "title": "Getting Started", "path": f"{crate_path}/getting-started",
              "sections": [
                  {"heading": "Prerequisites", "rich_content": ["table:requirements"]},
                  {"heading": "Installation", "rich_content": ["code:install"]},
-                 {"heading": "See Also", "rich_content": ["wikilinks:siblings"]},
              ], "key_files_to_read": ["README.md"]},
             {"doc_type": "architecture", "title": "Architecture", "path": f"{crate_path}/architecture",
              "sections": [
                  {"heading": "System Design", "rich_content": ["diagram:architecture"]},
                  {"heading": "Components", "rich_content": ["table:components"]},
-                 {"heading": "See Also", "rich_content": ["wikilinks:siblings"]},
              ], "key_files_to_read": ["README.md"]},
             {"doc_type": "api", "title": "API Reference", "path": f"{crate_path}/api",
              "sections": [
                  {"heading": "Endpoints", "rich_content": ["table:endpoints"]},
-                 {"heading": "See Also", "rich_content": ["wikilinks:siblings"]},
              ], "key_files_to_read": ["README.md"]},
         ]
 
@@ -1019,13 +1088,11 @@ CRITICAL RULES:
                 {"doc_type": "config", "title": "Configuration", "path": f"{crate_path}/config",
                  "sections": [
                      {"heading": "Environment Variables", "rich_content": ["table:env vars"]},
-                     {"heading": "See Also", "rich_content": ["wikilinks:siblings"]},
-                 ], "key_files_to_read": ["README.md"]},
+                     ], "key_files_to_read": ["README.md"]},
                 {"doc_type": "guide", "title": "User Guide", "path": f"{crate_path}/guide",
                  "sections": [
                      {"heading": "Core Workflow", "rich_content": ["diagram:workflow"]},
-                     {"heading": "See Also", "rich_content": ["wikilinks:siblings"]},
-                 ], "key_files_to_read": ["README.md"]},
+                     ], "key_files_to_read": ["README.md"]},
             ])
 
         if complexity == "large":
@@ -1033,13 +1100,11 @@ CRITICAL RULES:
                 {"doc_type": "data-model", "title": "Data Model", "path": f"{crate_path}/architecture/data-model",
                  "sections": [
                      {"heading": "Schema", "rich_content": ["diagram:ER diagram"]},
-                     {"heading": "See Also", "rich_content": ["wikilinks:siblings"]},
-                 ], "key_files_to_read": ["README.md"]},
+                     ], "key_files_to_read": ["README.md"]},
                 {"doc_type": "contributing", "title": "Contributing", "path": f"{crate_path}/contributing",
                  "sections": [
                      {"heading": "Development Setup", "rich_content": ["code:setup"]},
-                     {"heading": "See Also", "rich_content": ["wikilinks:siblings"]},
-                 ], "key_files_to_read": ["README.md"]},
+                     ], "key_files_to_read": ["README.md"]},
             ])
 
         all_titles = [p["title"] for p in core_pages]
@@ -1068,6 +1133,7 @@ CRITICAL RULES:
         "data-model":    ["architecture", "api"],
         "component":     ["architecture", "api"],
         "contributing":  ["tests", "structure", "infra"],
+        "capabilities": ["structure", "api", "architecture"],
     }
 
     def _get_relevant_scout_reports(self, doc_type: str) -> str:
@@ -1195,7 +1261,7 @@ Write a markdown page titled "# {title}"
 with the following sections:
 {section_directives}
 
-End with a "## See Also" section containing 3-8 wikilinks to related pages.
+DO NOT add a "See Also" section. All wikilinks must be inline in prose.
 
 OUTPUT:
 - Create the directory structure first: mkdir -p {workspace_output.parent}
@@ -1207,6 +1273,122 @@ OUTPUT:
 - Work AUTONOMOUSLY — do not ask for permission
 """
         return brief
+
+    # ------------------------------------------------------------------
+    # Orphan cleanup
+    # ------------------------------------------------------------------
+
+    def _snapshot_existing_docs(self) -> dict:
+        """Take a pre-generation snapshot of all docs belonging to this repo.
+
+        Returns a dict with:
+            doc_ids: set of all doc IDs for this repo
+            by_id: dict mapping doc_id → doc summary
+            human_edited: set of doc IDs with human edits in the last 7 days
+            count: total number of docs
+        Returns empty sets on any failure (cleanup will be skipped).
+        """
+        try:
+            existing = self.api_client.get_documents_by_repo(self.repo_url)
+            if not existing:
+                return {"doc_ids": set(), "by_id": {}, "human_edited": set(), "count": 0}
+
+            doc_ids = set()
+            by_id = {}
+            human_edited = set()
+
+            for doc in existing:
+                doc_id = doc.get("id")
+                if not doc_id:
+                    continue
+                doc_ids.add(doc_id)
+                by_id[doc_id] = doc
+
+                # Check version history for human edits within 7 days
+                try:
+                    versions = self.api_client.get_document_versions(doc_id)
+                    for version in versions:
+                        author_type = version.get("author_type", "")
+                        if author_type == "human":
+                            created = version.get("created_at", "")
+                            if created:
+                                from datetime import timezone
+                                version_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                                age = datetime.now(timezone.utc) - version_dt
+                                if age.days < 7:
+                                    human_edited.add(doc_id)
+                                    break
+                except Exception:
+                    pass  # If we can't check versions, don't mark as human-edited
+
+            print(f"[Snapshot] {len(doc_ids)} existing doc(s) for this repo, {len(human_edited)} human-edited (7d)")
+            return {
+                "doc_ids": doc_ids,
+                "by_id": by_id,
+                "human_edited": human_edited,
+                "count": len(doc_ids),
+            }
+        except Exception as e:
+            print(f"[Snapshot] Failed to snapshot existing docs: {e}")
+            return {"doc_ids": set(), "by_id": {}, "human_edited": set(), "count": 0}
+
+    def _cleanup_orphaned_docs(
+        self,
+        snapshot: dict,
+        generated_ids: set,
+        failed_ids: set,
+    ) -> dict:
+        """Delete orphaned AI-generated docs, preserving human-edited and failed ones.
+
+        Args:
+            snapshot: Result from _snapshot_existing_docs().
+            generated_ids: Doc IDs that were successfully generated this run.
+            failed_ids: Doc IDs that failed generation this run.
+
+        Returns:
+            Dict with deleted, preserved_human, preserved_failed, errors counts.
+        """
+        result = {"deleted": 0, "preserved_human": 0, "preserved_failed": 0, "errors": []}
+
+        if not snapshot["doc_ids"]:
+            print("[Cleanup] No snapshot — skipping orphan cleanup")
+            return result
+
+        orphans = snapshot["doc_ids"] - generated_ids - failed_ids
+        if not orphans:
+            print("[Cleanup] No orphaned documents found")
+            return result
+
+        human_edited = snapshot["human_edited"]
+        to_delete = orphans - human_edited
+        preserved_human = orphans & human_edited
+
+        result["preserved_human"] = len(preserved_human)
+        result["preserved_failed"] = len(failed_ids & snapshot["doc_ids"])
+
+        if preserved_human:
+            for doc_id in preserved_human:
+                title = snapshot["by_id"].get(doc_id, {}).get("title", doc_id)
+                print(f"[Cleanup] Preserving human-edited: {title} ({doc_id})")
+
+        if not to_delete:
+            print(f"[Cleanup] {len(orphans)} orphan(s) found, all preserved (human-edited)")
+            return result
+
+        print(f"[Cleanup] Deleting {len(to_delete)} orphaned doc(s)...")
+        for doc_id in to_delete:
+            title = snapshot["by_id"].get(doc_id, {}).get("title", doc_id)
+            print(f"   - {title} ({doc_id})")
+
+        delete_result = self.api_client.batch_delete(list(to_delete))
+        result["deleted"] = delete_result.get("succeeded", 0)
+        result["errors"] = delete_result.get("errors", [])
+
+        if result["errors"]:
+            print(f"[Cleanup] Batch delete had errors: {result['errors']}")
+
+        print(f"[Cleanup] Done: {result['deleted']} deleted, {result['preserved_human']} preserved (human), {result['preserved_failed']} preserved (failed)")
+        return result
 
     # ------------------------------------------------------------------
     # Generation
@@ -1407,6 +1589,9 @@ OUTPUT:
         print("[Pipeline] THREE-TIER DOCUMENTATION GENERATION")
         print("=" * 70)
 
+        # Pre-generation snapshot for orphan cleanup
+        snapshot = self._snapshot_existing_docs()
+
         # Phase 0: Check if this is a regeneration (docs already exist)
         regen_ctx = self._get_regeneration_context()
 
@@ -1442,20 +1627,41 @@ OUTPUT:
         blueprint = self._planner_think(scout_reports)
 
         documents = blueprint.get("documents", [])
+
+        # Reorder: detail/leaf pages first, hub pages last.
+        # Hub pages (overview, capabilities, quickstart) link to everything and
+        # benefit from all detail pages already existing in discovery.
+        _HUB_TYPES = {"overview", "capabilities", "quickstart"}
+        detail_docs = [d for d in documents if d.get("doc_type") not in _HUB_TYPES]
+        hub_docs = [d for d in documents if d.get("doc_type") in _HUB_TYPES]
+        documents = detail_docs + hub_docs
+
         total = len(documents)
-        print(f"\n[Phase 3] WRITERS — Generating {total} documents...")
+        print(f"\n[Phase 3] WRITERS — Generating {total} documents (detail pages first, hub pages last)...")
 
         # Discover existing docs (once, shared across writers)
         discovery = self._discover_existing_documents()
         print(f"   Existing documents in system: {discovery['count']}")
 
         # Phase 3: Writers execute
+        generated_doc_ids = set()
+        failed_doc_ids = set()
+
         for idx, doc_spec in enumerate(documents, 1):
             print(f"\n[{idx}/{total}] Dispatching writer for: {doc_spec['title']}")
             result = self.generate_document(
                 doc_spec, blueprint, discovery, scout_reports
             )
             results[doc_spec["title"]] = result
+
+            # Track generated/failed doc IDs for orphan cleanup
+            doc_id = result.get("doc_id")
+            if doc_id:
+                status = result.get("status", "")
+                if status in ("success", "skipped"):
+                    generated_doc_ids.add(doc_id)
+                elif status in ("error", "error_fallback", "warning"):
+                    failed_doc_ids.add(doc_id)
 
             # Re-discover after each doc so subsequent writers see earlier ones
             if result.get("status") == "success":
@@ -1479,6 +1685,13 @@ OUTPUT:
             status = result.get("status", "unknown")
             doc_id = result.get("doc_id", "")
             print(f"   {title}: {status} ({doc_id})")
+
+        # Phase 4: Orphan cleanup
+        if snapshot["count"] > 0:
+            print("\n[Phase 4] CLEANUP — Removing orphaned documents...")
+            cleanup = self._cleanup_orphaned_docs(snapshot, generated_doc_ids, failed_doc_ids)
+            if cleanup["deleted"] or cleanup["preserved_human"]:
+                print(f"   Deleted: {cleanup['deleted']}  Preserved (human): {cleanup['preserved_human']}  Preserved (failed): {cleanup['preserved_failed']}")
 
         return results
 
@@ -1525,15 +1738,36 @@ Examples:
         default=None,
         help="Override scout model",
     )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Override global LLM base URL (default: http://localhost:11434)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="Override global LLM API key",
+    )
+    parser.add_argument(
+        "--no-native-tools",
+        action="store_true",
+        help="Disable native tool calling (use text-based fallback)",
+    )
     args = parser.parse_args()
 
-    # Override models if specified via CLI
+    # Override config if specified via CLI
     if args.planner_model:
         os.environ["PLANNER_MODEL"] = args.planner_model
     if args.writer_model:
         os.environ["WRITER_MODEL"] = args.writer_model
     if args.scout_model:
         os.environ["SCOUT_MODEL"] = args.scout_model
+    if args.base_url:
+        os.environ["LLM_BASE_URL"] = args.base_url
+    if args.api_key:
+        os.environ["LLM_API_KEY"] = args.api_key
+    if args.no_native_tools:
+        os.environ["LLM_NATIVE_TOOL_CALLING"] = "false"
 
     # SECURITY: Validate repository URL
     validator = RepositoryValidator()
@@ -1560,7 +1794,7 @@ Examples:
     print()
 
     # Clone repository
-    repos_dir = Path(os.getenv("REPOS_DIR", "/repos"))
+    repos_dir = Path(os.getenv("REPOS_DIR", "./repos"))
     repos_dir.mkdir(exist_ok=True)
 
     try:
@@ -1597,8 +1831,7 @@ Examples:
                 "path": f"{crate_path}/{args.doc_type}",
                 "sections": [
                     {"heading": "Overview", "rich_content": []},
-                    {"heading": "See Also", "rich_content": ["wikilinks:siblings"]},
-                ],
+                   ],
                 "key_files_to_read": ["README.md"],
                 "wikilinks_out": [],
             }

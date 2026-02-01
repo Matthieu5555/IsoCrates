@@ -11,6 +11,7 @@ import { AddDocumentDialog } from './dialogs/AddDocumentDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
 import { buttonVariants, iconVariants, contextMenuVariants, menuItemVariants } from '@/lib/styles/button-variants';
 import { toast } from '@/lib/notifications/toast';
+import { getApiErrorMessage } from '@/lib/api/client';
 
 export function PersonalTree() {
   const router = useRouter();
@@ -138,7 +139,7 @@ export function PersonalTree() {
       setDeleteConfirmOpen(false);
       setSelectedNode(null);
     } catch (err) {
-      toast.error('Delete failed', (err as Error).message);
+      toast.error('Delete failed', getApiErrorMessage(err));
     }
   }
 
@@ -217,7 +218,7 @@ export function PersonalTree() {
   if (error) {
     return (
       <div className="p-4">
-        <div className="text-sm text-red-600 mb-2">Error: {error}</div>
+        <div className="text-sm text-muted-foreground mb-2">Could not load documents</div>
         <button onClick={loadTree} className="text-sm text-primary hover:underline">Retry</button>
       </div>
     );

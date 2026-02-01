@@ -20,6 +20,7 @@
     "@tiptap/pm": "^3.18.0",
     "@tiptap/react": "^3.18.0",
     "@tiptap/starter-kit": "^3.18.0",
+    "@types/dagre": "^0.7.53",
     "@xyflow/react": "^12.10.0",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -40,7 +41,6 @@
     "zustand": "^4.5.5"
   },
   "devDependencies": {
-    "@types/dagre": "^0.7.53",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",

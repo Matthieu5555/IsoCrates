@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { ThemeProvider } from "next-themes";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ToastContainer } from "@/components/notifications/ToastContainer";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -16,7 +18,10 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className="antialiased">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem themes={['light', 'dark', 'custom']}>
-          {children}
+          <ErrorBoundary>
+            {children}
+          </ErrorBoundary>
+          <ToastContainer />
         </ThemeProvider>
       </body>
     </html>

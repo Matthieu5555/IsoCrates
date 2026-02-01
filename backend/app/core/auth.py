@@ -44,6 +44,10 @@ class AuthContext:
     def is_admin(self) -> bool:
         return self.role == "admin"
 
+    @property
+    def is_service_account(self) -> bool:
+        return self.role == "service"
+
 
 # Dev-mode anonymous context: admin with root grant.
 # Uses a stub object for the grant to avoid importing the ORM model at module level.

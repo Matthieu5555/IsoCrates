@@ -163,6 +163,41 @@ class DocumentAPIClient:
         except requests.exceptions.RequestException:
             return False
 
+    # ----- batch operations ------------------------------------------------
+
+    def batch_delete(self, doc_ids: list) -> Dict[str, Any]:
+        """Soft-delete multiple documents in a single request.
+
+        Args:
+            doc_ids: List of document IDs to delete.
+
+        Returns:
+            Dict with total, succeeded, failed, errors keys.
+        """
+        if not doc_ids:
+            return {"total": 0, "succeeded": 0, "failed": 0, "errors": []}
+
+        endpoint = f"{self.api_url}/api/docs/batch"
+        payload = {"operation": "delete", "doc_ids": doc_ids}
+
+        try:
+            response = requests.post(
+                endpoint,
+                json=payload,
+                timeout=self.timeout,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as exc:
+            logger.error("Batch delete failed: %s", exc)
+            return {
+                "total": len(doc_ids),
+                "succeeded": 0,
+                "failed": len(doc_ids),
+                "errors": [str(exc)],
+            }
+
     # ----- internal --------------------------------------------------------
 
     def _fallback_to_file(self, doc_data: Dict[str, Any], file_path: Path) -> Dict[str, Any]:

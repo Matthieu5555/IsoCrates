@@ -33,7 +33,12 @@ export default function LoginPage() {
       }
       router.push('/docs');
     } catch (err: any) {
-      setError(err?.message || 'Authentication failed');
+      const msg = err?.message;
+      if (msg?.includes('Invalid') || msg?.includes('password') || msg?.includes('credentials') || msg?.includes('not found')) {
+        setError(msg);
+      } else {
+        setError('Authentication failed. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
