@@ -26,6 +26,7 @@ from ..schemas.folder import (
 # Upper bound on documents loaded for tree building.
 # Increase if the tree is truncated; decrease if memory is a concern.
 TREE_DOCUMENT_LIMIT = 1000
+UNCATEGORIZED_FOLDER = "Uncategorized"
 
 logger = logging.getLogger(__name__)
 
@@ -146,9 +147,9 @@ class FolderService:
             tree=self._tree_as_dicts(),
         )
 
-    def get_tree(self) -> List[TreeNode]:
-        """Build the full hierarchical navigation tree."""
-        return self._build_tree()
+    def get_tree(self, allowed_prefixes: Optional[List[str]] = None) -> List[TreeNode]:
+        """Build the hierarchical navigation tree, optionally scoped to allowed prefixes."""
+        return self._build_tree(allowed_prefixes=allowed_prefixes)
 
     def cleanup_orphans(self) -> int:
         """Remove folder metadata for paths that no longer contain any documents."""
@@ -186,12 +187,25 @@ class FolderService:
                     ancestor_id, FolderMetadataCreate(path=ancestor_path)
                 )
 
+    def _is_uncategorized(self, path: str) -> bool:
+        return path == UNCATEGORIZED_FOLDER
+
+    def _doc_path_filter(self, path: str):
+        """Return a SQLAlchemy filter matching documents at or under *path*.
+
+        Handles the synthetic "Uncategorized" folder whose documents have
+        path='' or path=NULL in the database.
+        """
+        if self._is_uncategorized(path):
+            return (Document.path.is_(None)) | (Document.path == "")
+        return (Document.path == path) | (Document.path.like(f"{path}/%"))
+
     def _path_exists(self, path: str) -> bool:
         """True if any active documents or folder metadata exist at or under *path*."""
         has_docs = (
             self.db.query(Document)
             .filter(Document.deleted_at.is_(None))
-            .filter((Document.path == path) | (Document.path.like(f"{path}/%")))
+            .filter(self._doc_path_filter(path))
             .first()
             is not None
         )
@@ -222,10 +236,7 @@ class FolderService:
         docs = (
             self.db.query(Document)
             .filter(Document.deleted_at.is_(None))
-            .filter(
-                (Document.path == folder_path)
-                | (Document.path.like(f"{folder_path}/%"))
-            )
+            .filter(self._doc_path_filter(folder_path))
             .all()
         )
         affected_count = len(docs)
@@ -260,23 +271,34 @@ class FolderService:
 
         affected_count = 0
 
-        # Move direct documents to parent
-        docs = self.db.query(Document).filter(Document.deleted_at.is_(None)).filter(Document.path == folder_path).all()
-        for doc in docs:
-            doc.path = parent_path
-            affected_count += 1
+        if self._is_uncategorized(folder_path):
+            # "Uncategorized" is virtual — documents already have empty path,
+            # there is nowhere to move them up to. Just count them.
+            docs = (
+                self.db.query(Document)
+                .filter(Document.deleted_at.is_(None))
+                .filter(self._doc_path_filter(folder_path))
+                .all()
+            )
+            affected_count = len(docs)
+        else:
+            # Move direct documents to parent
+            docs = self.db.query(Document).filter(Document.deleted_at.is_(None)).filter(Document.path == folder_path).all()
+            for doc in docs:
+                doc.path = parent_path
+                affected_count += 1
 
-        # Move documents in subfolders: strip the deleted segment
-        subdocs = (
-            self.db.query(Document)
-            .filter(Document.deleted_at.is_(None))
-            .filter(Document.path.like(f"{folder_path}/%"))
-            .all()
-        )
-        for doc in subdocs:
-            remaining = doc.path[len(folder_path) + 1:]
-            doc.path = f"{parent_path}/{remaining}" if parent_path else remaining
-            affected_count += 1
+            # Move documents in subfolders: strip the deleted segment
+            subdocs = (
+                self.db.query(Document)
+                .filter(Document.deleted_at.is_(None))
+                .filter(Document.path.like(f"{folder_path}/%"))
+                .all()
+            )
+            for doc in subdocs:
+                remaining = doc.path[len(folder_path) + 1:]
+                doc.path = f"{parent_path}/{remaining}" if parent_path else remaining
+                affected_count += 1
 
         # Delete only this folder's metadata
         fm = (
@@ -309,13 +331,16 @@ class FolderService:
     def _tree_as_dicts(self) -> List[Dict[str, Any]]:
         return [node.dict() for node in self._build_tree()]
 
-    def _build_tree(self) -> List[TreeNode]:
+    def _build_tree(self, allowed_prefixes: Optional[List[str]] = None) -> List[TreeNode]:
         """Build hierarchical tree from documents and folder metadata.
 
         path format: "crate/folder/subfolder"
         First segment = crate (top-level, is_crate=True).
+
+        When *allowed_prefixes* is provided, only documents under those path
+        prefixes are loaded from the database.
         """
-        documents = self.doc_repo.get_all(limit=TREE_DOCUMENT_LIMIT)
+        documents = self.doc_repo.get_all(limit=TREE_DOCUMENT_LIMIT, allowed_prefixes=allowed_prefixes)
         folder_metadata_list = self.folder_repo.get_all()
 
         # Index folder metadata by path
@@ -341,7 +366,7 @@ class FolderService:
             return node
 
         for doc in documents:
-            path = doc.path or "Uncategorized"
+            path = doc.path or UNCATEGORIZED_FOLDER
             node = ensure_path(path.split("/"))
             node["_docs"].append(doc)
 

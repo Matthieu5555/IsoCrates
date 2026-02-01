@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 # Find database file
-DB_PATH = Path(__file__).parent.parent / "alto_isocrates.db"
+DB_PATH = Path(__file__).parent.parent / "isocrates.db"
 
 def apply_migration(migration_file: str):
     """Apply a SQL migration file to the database."""

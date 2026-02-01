@@ -13,6 +13,7 @@ import { TableHeader } from '@tiptap/extension-table-header';
 import { Markdown } from 'tiptap-markdown';
 import { EditorToolbar } from './EditorToolbar';
 import { WikilinkExtension } from './extensions/WikilinkExtension';
+import { MermaidExtension } from './extensions/MermaidExtension';
 import { markdownSerializerConfig } from '@/lib/editor/markdownSerializer';
 import { resolveWikilink } from '@/lib/api/documents';
 import { toast } from '@/lib/notifications/toast';
@@ -55,7 +56,8 @@ export function MarkdownEditor({ content, onChange, placeholder, fullScreen }: M
 
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({}),
+      StarterKit.configure({ codeBlock: false }),
+      MermaidExtension,
       Underline,
       Table.configure({ resizable: true }),
       TableRow,

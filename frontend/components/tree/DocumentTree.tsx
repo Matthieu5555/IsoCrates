@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Plus, FileText, Folder, FolderOpen, Layers, RefreshCw, Clock, Loader2, CheckCircle2, XCircle, Trash2 } from 'lucide-react';
+import { Plus, FileText, Folder, FolderOpen, Layers, RefreshCw, Clock, Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { getTree, getTrash, deleteDocument, createDocument, moveFolder, moveDocument, createFolderMetadata, deleteFolder, type CreateDocumentData, type CreateFolderMetadataData } from '@/lib/api/documents';
 import { fetchApi } from '@/lib/api/client';
 import type { TreeNode } from '@/types';
@@ -16,6 +16,7 @@ import { BulkActionBar } from './BulkActionBar';
 import { executeBatch } from '@/lib/api/documents';
 import { buttonVariants, iconVariants, overlayVariants } from '@/lib/styles/button-variants';
 import { toast } from '@/lib/notifications/toast';
+import { useUIStore } from '@/lib/store/uiStore';
 
 export function DocumentTree() {
   const router = useRouter();
@@ -38,7 +39,6 @@ export function DocumentTree() {
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [rootDropActive, setRootDropActive] = useState(false);
   const [movingFolder, setMovingFolder] = useState(false);
-  const [trashCount, setTrashCount] = useState(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
 
@@ -63,8 +63,8 @@ export function DocumentTree() {
       // Fetch generation status for crate nodes
       fetchGenerationStatus(data);
 
-      // Fetch trash count for sidebar indicator
-      getTrash().then(items => setTrashCount(items.length)).catch(() => {});
+      // Fetch trash count for floating indicator
+      getTrash().then(items => useUIStore.getState().setTrashCount(items.length)).catch(() => {});
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load tree';
       setError(message);
@@ -181,6 +181,7 @@ export function DocumentTree() {
     try {
       if (selectedNode.type === 'document') {
         await deleteDocument(selectedNode.id);
+        useUIStore.getState().setTrashCount(useUIStore.getState().trashCount + 1);
         toast.success('Moved to trash', 'Document can be restored from the Trash');
       }
       await loadTree();
@@ -577,21 +578,6 @@ export function DocumentTree() {
         onDrop={handleRootDrop}
       >
         {tree.map(node => renderNode(node))}
-
-        {/* Trash node */}
-        {trashCount > 0 && (
-          <button
-            onClick={() => router.push('/docs/trash')}
-            className="w-full text-left px-3 py-2 hover:bg-muted rounded text-sm flex items-center gap-2 transition-colors text-muted-foreground mt-2 border-t border-border pt-3"
-          >
-            <span className="w-3" />
-            <Trash2 className="h-4 w-4" />
-            <span className="flex-1">Trash</span>
-            <span className="text-xs px-2 py-0.5 rounded bg-muted">
-              {trashCount}
-            </span>
-          </button>
-        )}
 
         {/* Visual hint for root drop */}
         {draggedNode && (

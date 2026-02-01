@@ -188,18 +188,18 @@ class DependencyService:
 
         active = Document.deleted_at.is_(None)
 
-        doc = self.db.query(Document).filter(active, Document.repo_name == target).first()
+        doc = self.db.query(Document).filter(active, Document.title == target).first()
         if doc:
             return doc.id
 
         doc = self.db.query(Document).filter(
-            active, func.lower(Document.repo_name) == target.lower()
+            active, func.lower(Document.title) == target.lower()
         ).first()
         if doc:
             return doc.id
 
         doc = self.db.query(Document).filter(
-            active, func.lower(Document.repo_name).contains(target.lower())
+            active, func.lower(Document.title).contains(target.lower())
         ).first()
         if doc:
             return doc.id

@@ -153,7 +153,8 @@ function DependencyGraphInner() {
     setEdges(e);
     // Fit view after layout settles
     setTimeout(() => fitView({ padding: 0.2 }), 50);
-  }, [rawData, direction, setNodes, setEdges, fitView]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawData, direction]);
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {

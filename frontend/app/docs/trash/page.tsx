@@ -5,6 +5,7 @@ import { Trash2, RotateCcw, XCircle } from 'lucide-react';
 import { getTrash, restoreDocument, permanentDeleteDocument } from '@/lib/api/documents';
 import { toast } from '@/lib/notifications/toast';
 import type { DocumentListItem } from '@/types';
+import { useUIStore } from '@/lib/store/uiStore';
 
 /**
  * Trash view showing soft-deleted documents with restore and permanent delete actions.
@@ -34,7 +35,11 @@ export default function TrashPage() {
   const handleRestore = async (docId: string) => {
     try {
       await restoreDocument(docId);
-      setItems(prev => prev.filter(d => d.id !== docId));
+      setItems(prev => {
+        const next = prev.filter(d => d.id !== docId);
+        useUIStore.getState().setTrashCount(next.length);
+        return next;
+      });
       toast.success('Restored', 'Document restored from trash');
     } catch {
       toast.error('Error', 'Failed to restore document');
@@ -45,7 +50,11 @@ export default function TrashPage() {
     if (!confirm(`Permanently delete "${title}"? This cannot be undone.`)) return;
     try {
       await permanentDeleteDocument(docId);
-      setItems(prev => prev.filter(d => d.id !== docId));
+      setItems(prev => {
+        const next = prev.filter(d => d.id !== docId);
+        useUIStore.getState().setTrashCount(next.length);
+        return next;
+      });
       toast.success('Deleted', 'Document permanently deleted');
     } catch {
       toast.error('Error', 'Failed to delete document');

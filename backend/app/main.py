@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from .database import engine, Base, get_db, SessionLocal
 from .api import documents_router, versions_router, tree_router, dependencies_router, graph_router, folders_router, personal_router, webhooks_router, jobs_router
+from .api.auth_routes import router as auth_router
 from .core.config import settings
 from .core.logging_config import setup_logging
 from .middleware.exception_handler import iso_exception_handler
@@ -58,6 +59,7 @@ logger.info(f"CORS allowed origins: {settings.get_cors_origins()}")
 logger.info(f"Database: {settings.database_url}")
 
 # Include routers
+app.include_router(auth_router)
 app.include_router(documents_router)
 app.include_router(versions_router)
 app.include_router(dependencies_router)
@@ -67,6 +69,42 @@ app.include_router(tree_router)
 app.include_router(personal_router)
 app.include_router(webhooks_router)
 app.include_router(jobs_router)
+
+
+@app.on_event("startup")
+def check_security_config():
+    """Warn about insecure configuration at startup."""
+    if settings.jwt_secret_key == "dev-insecure-key-change-me":
+        if settings.auth_enabled:
+            logger.critical(
+                "SECURITY: AUTH_ENABLED=true but JWT_SECRET_KEY is the default. "
+                "Anyone can forge tokens. Generate a secure key: openssl rand -hex 32"
+            )
+        else:
+            logger.warning(
+                "SECURITY: JWT_SECRET_KEY is the default. "
+                "Set a secure key before enabling auth: openssl rand -hex 32"
+            )
+
+    if not settings.auth_enabled:
+        logger.warning(
+            "SECURITY: Authentication is disabled (AUTH_ENABLED=false). "
+            "All write endpoints are unprotected. Set AUTH_ENABLED=true for production."
+        )
+
+    if not settings.github_webhook_secret:
+        logger.warning(
+            "SECURITY: GITHUB_WEBHOOK_SECRET is empty. "
+            "Webhook signature verification is disabled."
+        )
+
+    origins = settings.get_cors_origins()
+    localhost_origins = [o for o in origins if "localhost" in o or "127.0.0.1" in o]
+    if localhost_origins:
+        logger.warning(
+            "CORS allows localhost origins: %s. Remove these for production.",
+            localhost_origins,
+        )
 
 
 @app.on_event("startup")

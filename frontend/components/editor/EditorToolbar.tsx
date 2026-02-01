@@ -12,7 +12,7 @@ import {
   Heading3,
   List,
   ListOrdered,
-  Code,
+  GitGraph,
   Quote,
   Minus,
   Undo,
@@ -116,10 +116,10 @@ export function EditorToolbar({ editor }: EditorToolbarProps) {
         isActive: () => editor.isActive('orderedList'),
       },
       {
-        icon: Code,
-        label: 'Code Block',
-        action: () => editor.chain().focus().toggleCodeBlock().run(),
-        isActive: () => editor.isActive('codeBlock'),
+        icon: GitGraph,
+        label: 'Diagram',
+        action: () => editor.chain().focus().setCodeBlock({ language: 'mermaid' }).run(),
+        isActive: () => editor.isActive('codeBlock', { language: 'mermaid' }),
       },
       {
         icon: Quote,

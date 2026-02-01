@@ -11,7 +11,7 @@ services:
       - ./backend:/app
       - ./silverbullet_era/notes:/notes  # Access to legacy notes for migration
     environment:
-      DATABASE_URL: sqlite:////app/alto_isocrates.db
+      DATABASE_URL: sqlite:////app/isocrates.db
       CORS_ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001"
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-insecure-key-change-me}
@@ -54,6 +54,8 @@ services:
       SANDBOX_TYPE: local
       DOC_API_URL: http://backend-api:8000
       DOC_API_TOKEN: ${DOC_API_TOKEN:-}
+      REPOS_DIR: /repos
+      NOTES_DIR: /tmp/notes
     volumes:
       # SECURITY: Read-only agent code
       - ./agent:/workspace:ro
@@ -99,18 +101,21 @@ services:
       dockerfile: Dockerfile
     container_name: doc-worker
     environment:
-      DATABASE_URL: sqlite:////app/alto_isocrates.db
+      DATABASE_URL: sqlite:////app/isocrates.db
       AGENT_SCRIPT_PATH: /workspace/openhands_doc.py
+      AGENT_MODE: docker
+      AGENT_CONTAINER: doc-agent
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       DOC_API_URL: http://backend-api:8000
+      DAILY_REFRESH_INTERVAL: "86400"  # 24 hours
     volumes:
       - ./backend:/app
-      - ./agent:/workspace:ro
-      - ./repos:/repos:rw,nosuid,nodev
+      - /var/run/docker.sock:/var/run/docker.sock  # Access to exec into doc-agent
     working_dir: /app
     command: python worker.py
     depends_on:
       - backend-api
+      - doc-agent
     restart: unless-stopped
 
 networks:

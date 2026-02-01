@@ -31,6 +31,7 @@ class ErrorCode(str, Enum):
 
     # Auth & rate limiting
     UNAUTHORIZED = "UNAUTHORIZED"
+    FORBIDDEN = "FORBIDDEN"
     RATE_LIMITED = "RATE_LIMITED"
 
     # Generic errors
@@ -164,6 +165,17 @@ class AuthenticationError(IsoException):
             message,
             ErrorCode.UNAUTHORIZED,
             status_code=401,
+        )
+
+
+class ForbiddenError(IsoException):
+    """Authenticated user lacks permission for the requested action."""
+
+    def __init__(self, message: str = "You do not have permission to perform this action"):
+        super().__init__(
+            message,
+            ErrorCode.FORBIDDEN,
+            status_code=403,
         )
 
 

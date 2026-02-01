@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def migrate():
     """Add path and title columns if they don't exist."""
-    db_path = Path(__file__).parent.parent / "alto_isocrates.db"
+    db_path = Path(__file__).parent.parent / "isocrates.db"
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()

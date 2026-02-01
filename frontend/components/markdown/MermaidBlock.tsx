@@ -10,6 +10,64 @@ interface MermaidBlockProps {
 // Incrementing ID to ensure unique mermaid render targets
 let mermaidIdCounter = 0;
 
+/** Read a CSS custom property as HSL values and convert to hex. */
+function cssVarToHex(varName: string, fallback: string): string {
+  if (typeof document === 'undefined') return fallback;
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue(varName)
+    .trim();
+  if (!raw) return fallback;
+
+  const [h, sRaw, lRaw] = raw.split(/\s+/);
+  const s = parseFloat(sRaw) / 100;
+  const l = parseFloat(lRaw) / 100;
+
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + parseFloat(h) / 30) % 12;
+    const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * color)
+      .toString(16)
+      .padStart(2, '0');
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+function getMermaidConfig() {
+  if (typeof document === 'undefined') {
+    return { theme: 'default' as const, securityLevel: 'strict' as const, startOnLoad: false };
+  }
+
+  const isDark = document.documentElement.classList.contains('dark');
+  const isCustom = document.documentElement.classList.contains('custom');
+
+  if (isCustom) {
+    return {
+      startOnLoad: false,
+      theme: 'base' as const,
+      securityLevel: 'strict' as const,
+      themeVariables: {
+        primaryColor: cssVarToHex('--primary', '#6366f1'),
+        primaryTextColor: cssVarToHex('--primary-foreground', '#ffffff'),
+        primaryBorderColor: cssVarToHex('--border', '#e2e8f0'),
+        lineColor: cssVarToHex('--foreground', '#334155'),
+        secondaryColor: cssVarToHex('--secondary', '#f1f5f9'),
+        tertiaryColor: cssVarToHex('--muted', '#f1f5f9'),
+        background: cssVarToHex('--background', '#ffffff'),
+        textColor: cssVarToHex('--foreground', '#334155'),
+        noteBkgColor: cssVarToHex('--muted', '#f1f5f9'),
+        fontFamily: 'inherit',
+      },
+    };
+  }
+
+  return {
+    startOnLoad: false,
+    theme: isDark ? 'dark' as const : 'default' as const,
+    securityLevel: 'strict' as const,
+  };
+}
+
 /**
  * Renders a Mermaid diagram from its text definition.
  *
@@ -33,11 +91,7 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     async function renderDiagram() {
       try {
         const mermaid = (await import('mermaid')).default;
-        mermaid.initialize({
-          startOnLoad: false,
-          theme: 'default',
-          securityLevel: 'strict',
-        });
+        mermaid.initialize(getMermaidConfig());
 
         const { svg } = await mermaid.render(id, chart.trim());
         if (!cancelled && containerRef.current) {

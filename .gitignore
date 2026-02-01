@@ -73,6 +73,7 @@ docker-compose.override.yml
 # Repositories (cloned by agent)
 repos/*
 !repos/.gitkeep
+agent/repos/
 
 # Documentation
 *.md

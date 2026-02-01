@@ -112,9 +112,9 @@ class DocumentService:
         """Get document by ID."""
         return self.doc_repo.get_by_id(doc_id)
 
-    def list_documents(self, skip: int = 0, limit: int = 100, path_prefix: Optional[str] = None) -> List[DocumentListResponse]:
+    def list_documents(self, skip: int = 0, limit: int = 100, path_prefix: Optional[str] = None, repo_url: Optional[str] = None, allowed_prefixes: Optional[list[str]] = None) -> List[DocumentListResponse]:
         """List all documents."""
-        documents = self.doc_repo.get_all(skip, limit, path_prefix)
+        documents = self.doc_repo.get_all(skip, limit, path_prefix, repo_url=repo_url, allowed_prefixes=allowed_prefixes)
         return [
             DocumentListResponse(
                 id=doc.id,
@@ -130,6 +130,10 @@ class DocumentService:
             for doc in documents
         ]
 
+    def get_tracked_repo_urls(self) -> list[str]:
+        """Get distinct repo URLs that have documentation."""
+        return self.doc_repo.get_tracked_repo_urls()
+
     def delete_document(self, doc_id: str) -> bool:
         """Soft-delete document (moves to trash). Idempotent."""
         return self.doc_repo.soft_delete(doc_id)
@@ -142,9 +146,9 @@ class DocumentService:
         """Permanently delete a document. Idempotent."""
         return self.doc_repo.permanent_delete(doc_id)
 
-    def list_trash(self, skip: int = 0, limit: int = 100) -> List[DocumentListResponse]:
+    def list_trash(self, skip: int = 0, limit: int = 100, allowed_prefixes: Optional[list[str]] = None) -> List[DocumentListResponse]:
         """List soft-deleted documents."""
-        documents = self.doc_repo.get_deleted(skip, limit)
+        documents = self.doc_repo.get_deleted(skip, limit, allowed_prefixes=allowed_prefixes)
         return [
             DocumentListResponse(
                 id=doc.id,
@@ -218,15 +222,17 @@ class DocumentService:
         keywords: Optional[list] = None,
         date_from=None,
         date_to=None,
+        allowed_prefixes: Optional[list[str]] = None,
     ) -> list[dict]:
         """Search documents using FTS5 (with LIKE fallback). Returns dicts."""
         return self.doc_repo.search_fts(
-            query, limit, path_prefix, keywords, date_from, date_to
+            query, limit, path_prefix, keywords, date_from, date_to,
+            allowed_prefixes=allowed_prefixes,
         )
 
-    def get_recent_documents(self, limit: int = 20) -> List[Document]:
+    def get_recent_documents(self, limit: int = 20, allowed_prefixes: Optional[list[str]] = None) -> List[Document]:
         """Get the most recently updated documents."""
-        return self.doc_repo.get_recent(limit)
+        return self.doc_repo.get_recent(limit, allowed_prefixes=allowed_prefixes)
 
     def execute_batch(self, operation: str, doc_ids: list[str], params: dict) -> dict:
         """Execute a batch operation on multiple documents.

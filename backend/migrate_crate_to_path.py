@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "alto_isocrates.db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "isocrates.db")
 
 
 def migrate(db_path: str = DB_PATH):

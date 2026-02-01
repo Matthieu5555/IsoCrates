@@ -40,6 +40,20 @@ export interface TreeNode {
   icon?: string;
 }
 
+export interface FolderGrant {
+  path_prefix: string;
+  role: 'admin' | 'editor' | 'viewer';
+}
+
+export interface User {
+  user_id: string;
+  display_name: string;
+  email?: string;
+  role: 'admin' | 'editor' | 'viewer';
+  is_active: boolean;
+  grants: FolderGrant[];
+}
+
 export interface PersonalTreeNode {
   id: string;
   name: string;

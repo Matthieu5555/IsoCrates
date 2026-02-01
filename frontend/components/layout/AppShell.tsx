@@ -4,6 +4,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { useUIStore } from '@/lib/store/uiStore';
 import { useSearchStore } from '@/lib/store/searchStore';
 import { TopBar } from './TopBar';
+import { TrashBin } from './TrashBin';
 
 interface AppShellProps {
   sidebar: React.ReactNode;
@@ -94,6 +95,8 @@ export function AppShell({ sidebar, children }: AppShellProps) {
           {children}
         </main>
       </div>
+
+      <TrashBin />
     </div>
   );
 }

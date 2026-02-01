@@ -140,6 +140,21 @@ class DocumentAPIClient:
             logger.warning("Failed to get all documents: %s", exc)
             return []
 
+    def get_documents_by_repo(self, repo_url: str, limit: int = 100) -> list:
+        """Get all documents for a specific repository URL."""
+        try:
+            response = requests.get(
+                f"{self.api_url}/api/docs",
+                params={"repo_url": repo_url, "limit": limit},
+                timeout=self.timeout,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as exc:
+            logger.warning("Failed to get documents for repo %s: %s", repo_url, exc)
+            return []
+
     def health_check(self) -> bool:
         """Check if API is healthy."""
         try:

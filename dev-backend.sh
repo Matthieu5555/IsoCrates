@@ -11,7 +11,7 @@ cd "$(dirname "$0")/backend"
 if [ ! -f .env ]; then
     echo "Creating .env file..."
     cat > .env << EOF
-DATABASE_URL=sqlite:///./alto_isocrates.db
+DATABASE_URL=sqlite:///./isocrates.db
 CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
 LOG_LEVEL=DEBUG
 EOF

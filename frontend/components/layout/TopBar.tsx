@@ -27,9 +27,9 @@ export function TopBar() {
               <Menu className="h-5 w-5" />
             </button>
 
-            <div className="flex items-center gap-2">
-              <h1 className="text-sm font-semibold">Amundi Technology  |  IsoCrates</h1>
-            </div>
+            <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+              <h1 className="text-sm font-semibold">IsoCrates  |  Homepage</h1>
+            </Link>
           </div>
 
           {/* Right section: Graph + Search + Settings */}

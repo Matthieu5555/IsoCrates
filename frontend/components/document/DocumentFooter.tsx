@@ -26,7 +26,7 @@ export function DocumentFooter({ document, latestAuthor = 'ai', latestDate }: Do
     }));
   }, [latestDate, document.updated_at]);
 
-  const authorName = latestAuthor === 'human' ? 'admin' : 'IsoCrates';
+  const authorName = latestAuthor === 'human' ? 'admin' : 'Isiio';
 
   return (
     <div className="mt-8 pt-4 border-t border-border text-sm text-muted-foreground italic">

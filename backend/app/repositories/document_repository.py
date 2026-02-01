@@ -6,7 +6,7 @@ so callers never need to think about the deleted_at column.
 """
 
 from sqlalchemy.orm import Session, Query
-from sqlalchemy import text
+from sqlalchemy import text, or_
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from ..models import Document
@@ -28,6 +28,27 @@ class DocumentRepository:
     def _active_query(self) -> Query:
         """Base query that excludes soft-deleted documents."""
         return self.db.query(Document).filter(Document.deleted_at.is_(None))
+
+    @staticmethod
+    def _grant_filter(allowed_prefixes: list[str]):
+        """Build a SQLAlchemy OR filter for path-prefix grants.
+
+        Each prefix matches documents whose path equals the prefix or starts
+        with prefix + '/'.  An empty string means root access (matches all).
+        Returns None when no filtering is needed (root access or no prefixes).
+        """
+        if not allowed_prefixes:
+            return Document.id.is_(None)  # no grants → match nothing
+
+        # Root grant present → no filtering needed
+        if "" in allowed_prefixes:
+            return None
+
+        clauses = []
+        for prefix in allowed_prefixes:
+            clauses.append(Document.path == prefix)
+            clauses.append(Document.path.like(f"{prefix}/%"))
+        return or_(*clauses)
 
     def create(self, doc_id: str, document: DocumentCreate) -> Document:
         """Create a new document."""
@@ -65,15 +86,44 @@ class DocumentRepository:
             Document.doc_type == doc_type
         ).first()
 
-    def get_all(self, skip: int = 0, limit: int = 100, path_prefix: Optional[str] = None) -> List[Document]:
-        """Get all active documents with pagination, optionally filtered by path prefix."""
+    def get_all(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        path_prefix: Optional[str] = None,
+        repo_url: Optional[str] = None,
+        allowed_prefixes: Optional[list[str]] = None,
+    ) -> List[Document]:
+        """Get all active documents with pagination, optionally filtered by path prefix or repo URL.
+
+        When *allowed_prefixes* is provided, only documents under those path
+        prefixes are returned.  This pushes permission filtering into SQL so
+        pagination counts are accurate.
+        """
         query = self._active_query()
         if path_prefix:
             query = query.filter(
                 (Document.path == path_prefix) |
                 (Document.path.like(f"{path_prefix}/%"))
             )
+        if repo_url:
+            query = query.filter(Document.repo_url == repo_url)
+        if allowed_prefixes is not None:
+            grant_filter = self._grant_filter(allowed_prefixes)
+            if grant_filter is not None:
+                query = query.filter(grant_filter)
         return query.offset(skip).limit(limit).all()
+
+    def get_tracked_repo_urls(self) -> List[str]:
+        """Get distinct repo_url values from active documents."""
+        rows = (
+            self._active_query()
+            .filter(Document.repo_url.isnot(None), Document.repo_url != "")
+            .with_entities(Document.repo_url)
+            .distinct()
+            .all()
+        )
+        return [row[0] for row in rows]
 
     def update(self, doc_id: str, document: DocumentUpdate) -> Optional[Document]:
         """Update document content."""
@@ -132,14 +182,17 @@ class DocumentRepository:
         self.db.commit()
         return True
 
-    def get_deleted(self, skip: int = 0, limit: int = 100) -> List[Document]:
+    def get_deleted(self, skip: int = 0, limit: int = 100, allowed_prefixes: Optional[list[str]] = None) -> List[Document]:
         """Get soft-deleted documents (trash), ordered by deletion time descending."""
-        return (
+        query = (
             self.db.query(Document)
             .filter(Document.deleted_at.isnot(None))
-            .order_by(Document.deleted_at.desc())
-            .offset(skip).limit(limit).all()
         )
+        if allowed_prefixes is not None:
+            grant_filter = self._grant_filter(allowed_prefixes)
+            if grant_filter is not None:
+                query = query.filter(grant_filter)
+        return query.order_by(Document.deleted_at.desc()).offset(skip).limit(limit).all()
 
     def purge_expired(self, days: int = 30) -> int:
         """Permanently delete documents that have been in trash longer than `days`."""
@@ -157,11 +210,14 @@ class DocumentRepository:
             self.db.commit()
         return count
 
-    def search(self, query: str, limit: int = 20) -> List[Document]:
+    def search(self, query: str, limit: int = 20, allowed_prefixes: Optional[list[str]] = None) -> List[Document]:
         """Simple LIKE search fallback (excludes soft-deleted)."""
-        return self._active_query().filter(
-            Document.content.contains(query)
-        ).limit(limit).all()
+        q = self._active_query().filter(Document.content.contains(query))
+        if allowed_prefixes is not None:
+            grant_filter = self._grant_filter(allowed_prefixes)
+            if grant_filter is not None:
+                q = q.filter(grant_filter)
+        return q.limit(limit).all()
 
     def search_fts(
         self,
@@ -171,6 +227,7 @@ class DocumentRepository:
         keywords: Optional[list] = None,
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
+        allowed_prefixes: Optional[list[str]] = None,
     ) -> list[dict]:
         """Full-text search using FTS5 with ranking and snippets.
 
@@ -203,6 +260,18 @@ class DocumentRepository:
                 sql += " AND (d.path = :path_prefix OR d.path LIKE :path_like)"
                 params["path_prefix"] = path_prefix
                 params["path_like"] = f"{path_prefix}/%"
+
+            if allowed_prefixes is not None and "" not in allowed_prefixes:
+                if not allowed_prefixes:
+                    return []  # no grants → no results
+                grant_clauses = []
+                for i, prefix in enumerate(allowed_prefixes):
+                    p_exact = f":gp_exact_{i}"
+                    p_like = f":gp_like_{i}"
+                    grant_clauses.append(f"(d.path = {p_exact} OR d.path LIKE {p_like})")
+                    params[f"gp_exact_{i}"] = prefix
+                    params[f"gp_like_{i}"] = f"{prefix}/%"
+                sql += f" AND ({' OR '.join(grant_clauses)})"
 
             if date_from:
                 sql += " AND d.updated_at >= :date_from"
@@ -248,7 +317,7 @@ class DocumentRepository:
 
         except Exception:
             # FTS5 table may not exist yet — fall back to LIKE search
-            docs = self.search(query, limit)
+            docs = self.search(query, limit, allowed_prefixes=allowed_prefixes)
             return [
                 {
                     "id": d.id,
@@ -266,13 +335,14 @@ class DocumentRepository:
                 for d in docs
             ]
 
-    def get_recent(self, limit: int = 20) -> List[Document]:
+    def get_recent(self, limit: int = 20, allowed_prefixes: Optional[list[str]] = None) -> List[Document]:
         """Get most recently updated active documents."""
-        return (
-            self._active_query()
-            .order_by(Document.updated_at.desc())
-            .limit(limit).all()
-        )
+        query = self._active_query()
+        if allowed_prefixes is not None:
+            grant_filter = self._grant_filter(allowed_prefixes)
+            if grant_filter is not None:
+                query = query.filter(grant_filter)
+        return query.order_by(Document.updated_at.desc()).limit(limit).all()
 
     def move_folder(self, source_path: str, target_path: str) -> int:
         """Move folder by updating path prefixes (active docs only)."""

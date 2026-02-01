@@ -43,7 +43,7 @@ export function MetadataDigest({
     );
   }, [document.updated_at, latestDate]);
 
-  const authorName = latestAuthor === 'human' ? 'admin' : 'IsoCrates';
+  const authorName = latestAuthor === 'human' ? 'admin' : 'Isiio';
 
   if (!mounted) {
     return (

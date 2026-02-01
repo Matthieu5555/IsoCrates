@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker
 import os
 
 # Database URL - start with SQLite for POC, can switch to PostgreSQL later
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./alto_isocrates.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./isocrates.db")
 
 # Create engine
 if DATABASE_URL.startswith("sqlite"):

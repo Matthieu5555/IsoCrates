@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # Database Configuration
     database_url: str = Field(
-        default="sqlite:///./alto_isocrates.db",
+        default="sqlite:///./isocrates.db",
         description="Database connection URL"
     )
 
