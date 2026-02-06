@@ -89,9 +89,9 @@ class DependencyService:
         """
         return self.dep_repo.get_by_document(doc_id)
 
-    def get_all_dependencies(self) -> List[Dependency]:
+    def get_all_dependencies(self, allowed_prefixes: Optional[list[str]] = None) -> List[Dependency]:
         """Get all dependencies in the system (for graph visualization)."""
-        return self.dep_repo.get_all()
+        return self.dep_repo.get_all(allowed_prefixes=allowed_prefixes)
 
     def delete_dependency(self, dependency_id: int) -> bool:
         """Delete a specific dependency by ID."""
@@ -135,7 +135,7 @@ class DependencyService:
         # If there's already a path from target back to source, this would create a cycle
         return self._has_path(to_doc_id, from_doc_id, set())
 
-    def replace_document_dependencies(self, doc_id: str, content: str) -> None:
+    def replace_document_dependencies(self, doc_id: str, content: str) -> list[str]:
         """
         Extract wikilinks from content and replace all outgoing dependencies.
 
@@ -146,32 +146,47 @@ class DependencyService:
         Args:
             doc_id: Source document ID
             content: Document markdown content containing [[wikilinks]]
+
+        Returns:
+            List of wikilink targets that could not be resolved (empty = all good).
+            Callers can use this to surface warnings about broken links.
         """
         # Delete existing outgoing dependencies for this document (single query)
         self.dep_repo.delete_outgoing(doc_id)
 
-        # Extract and resolve wikilinks
+        # Extract wikilinks, filter URLs, batch-resolve in 4 queries total
         wikilink_targets = self._extract_wikilinks(content)
+        internal_targets = {
+            t for t in wikilink_targets
+            if not t.startswith(('http://', 'https://', 'ftp://'))
+        }
 
-        for target in wikilink_targets:
-            # Skip URL-like targets (not internal wikilinks)
-            if target.startswith(('http://', 'https://', 'ftp://')):
+        resolved = self._resolve_wikilinks_batch(internal_targets)
+        unresolved = sorted(internal_targets - set(resolved.keys()))
+
+        for target, target_doc_id in resolved.items():
+            if target_doc_id == doc_id:
                 continue
-            target_doc_id = self.resolve_wikilink(target)
-            if target_doc_id and target_doc_id != doc_id:
-                dependency = DependencyCreate(
-                    from_doc_id=doc_id,
-                    to_doc_id=target_doc_id,
-                    link_type="wikilink",
-                    link_text=target
+            dependency = DependencyCreate(
+                from_doc_id=doc_id,
+                to_doc_id=target_doc_id,
+                link_type="wikilink",
+                link_text=target
+            )
+            try:
+                self.create_dependency(dependency)
+            except (DocumentNotFoundError, CircularDependencyError, SelfDependencyError) as e:
+                logger.warning(
+                    f"Skipped dependency from {doc_id} to {target_doc_id}: {e}",
+                    extra={'from_doc_id': doc_id, 'to_doc_id': target_doc_id}
                 )
-                try:
-                    self.create_dependency(dependency)
-                except (DocumentNotFoundError, CircularDependencyError, SelfDependencyError) as e:
-                    logger.warning(
-                        f"Skipped dependency from {doc_id} to {target_doc_id}: {e}",
-                        extra={'from_doc_id': doc_id, 'to_doc_id': target_doc_id}
-                    )
+
+        if unresolved:
+            logger.info(
+                "Unresolved wikilinks in %s: %s", doc_id, unresolved,
+                extra={'doc_id': doc_id, 'unresolved_count': len(unresolved)}
+            )
+        return unresolved
 
     def _extract_wikilinks(self, content: str) -> Set[str]:
         """Extract all wikilink targets from markdown content.
@@ -190,44 +205,92 @@ class DependencyService:
         return targets
 
     def resolve_wikilink(self, target: str) -> Optional[str]:
-        """Resolve a wikilink target to a document ID.
+        """Resolve a single wikilink target to a document ID.
 
-        Uses exact title match, then case-insensitive title match, then
-        repo_name match. Partial/fuzzy matching was removed because it
-        created false-positive dependencies to unrelated documents.
+        For bulk resolution, prefer _resolve_wikilinks_batch() which does
+        4 queries total instead of 4 per target.
         """
+        result = self._resolve_wikilinks_batch({target})
+        return result.get(target)
+
+    def _resolve_wikilinks_batch(self, targets: Set[str]) -> dict[str, str]:
+        """Batch-resolve wikilink targets to document IDs.
+
+        Uses the same 4-stage resolution strategy as resolve_wikilink() but
+        resolves all targets in 4 queries total instead of 4*N.
+
+        Returns:
+            Dict mapping target string -> document ID for resolved targets only.
+            Unresolved targets are omitted from the result.
+        """
+        if not targets:
+            return {}
+
         from sqlalchemy import func
         from ..models import Document
 
         active = Document.deleted_at.is_(None)
+        resolved: dict[str, str] = {}
+        remaining = set(targets)
 
-        # Stage 1: Exact title match
-        doc = self.db.query(Document).filter(active, Document.title == target).first()
-        if doc:
-            return doc.id
+        # Stage 1: Exact title match (1 query for all targets)
+        docs = self.db.query(Document.id, Document.title).filter(
+            active, Document.title.in_(remaining)
+        ).all()
+        for doc_id, title in docs:
+            for target in list(remaining):
+                if title == target:
+                    resolved[target] = doc_id
+                    remaining.discard(target)
+                    break
 
-        # Stage 2: Case-insensitive title match
-        doc = self.db.query(Document).filter(
-            active, func.lower(Document.title) == target.lower()
-        ).first()
-        if doc:
-            return doc.id
+        if not remaining:
+            return resolved
 
-        # Stage 3: Exact repo_name match (wikilinks often reference repo names)
-        doc = self.db.query(Document).filter(
-            active, Document.repo_name == target
-        ).first()
-        if doc:
-            return doc.id
+        # Stage 2: Case-insensitive title match (1 query)
+        lower_remaining = {t.lower() for t in remaining}
+        docs = self.db.query(Document.id, Document.title).filter(
+            active, func.lower(Document.title).in_(lower_remaining)
+        ).all()
+        for doc_id, title in docs:
+            title_lower = title.lower() if title else ""
+            for target in list(remaining):
+                if target.lower() == title_lower:
+                    resolved[target] = doc_id
+                    remaining.discard(target)
+                    break
 
-        # Stage 4: Case-insensitive repo_name match
-        doc = self.db.query(Document).filter(
-            active, func.lower(Document.repo_name) == target.lower()
-        ).first()
-        if doc:
-            return doc.id
+        if not remaining:
+            return resolved
 
-        return None
+        # Stage 3: Exact repo_name match (1 query)
+        docs = self.db.query(Document.id, Document.repo_name).filter(
+            active, Document.repo_name.in_(remaining)
+        ).all()
+        for doc_id, repo_name in docs:
+            for target in list(remaining):
+                if repo_name == target:
+                    resolved[target] = doc_id
+                    remaining.discard(target)
+                    break
+
+        if not remaining:
+            return resolved
+
+        # Stage 4: Case-insensitive repo_name match (1 query)
+        lower_remaining = {t.lower() for t in remaining}
+        docs = self.db.query(Document.id, Document.repo_name).filter(
+            active, func.lower(Document.repo_name).in_(lower_remaining)
+        ).all()
+        for doc_id, repo_name in docs:
+            repo_lower = repo_name.lower() if repo_name else ""
+            for target in list(remaining):
+                if target.lower() == repo_lower:
+                    resolved[target] = doc_id
+                    remaining.discard(target)
+                    break
+
+        return resolved
 
     def update_wikilinks_on_move(self, doc_id: str, old_identifier: str, new_identifier: str) -> int:
         """Update wikilink text in all documents that reference the moved document.
@@ -311,18 +374,21 @@ class DependencyService:
             return []
 
         targets = self._extract_wikilinks(doc.content)
-        results = []
-        for target in sorted(targets):
-            # Skip URL-like targets (not internal wikilinks)
-            if target.startswith(('http://', 'https://', 'ftp://')):
-                continue
-            resolved_id = self.resolve_wikilink(target)
-            results.append(BrokenLinkInfo(
+        internal_targets = {
+            t for t in targets
+            if not t.startswith(('http://', 'https://', 'ftp://'))
+        }
+
+        resolved = self._resolve_wikilinks_batch(internal_targets)
+
+        return [
+            BrokenLinkInfo(
                 target=target,
-                resolved=resolved_id is not None,
-                resolved_doc_id=resolved_id,
-            ))
-        return results
+                resolved=target in resolved,
+                resolved_doc_id=resolved.get(target),
+            )
+            for target in sorted(internal_targets)
+        ]
 
     def _has_path(self, start: str, target: str, visited: Set[str]) -> bool:
         """

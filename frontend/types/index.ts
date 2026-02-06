@@ -5,10 +5,12 @@ export interface DocumentListItem {
   title: string;
   doc_type?: string;
   keywords: string[];
+  description?: string;
   content_preview: string;
   updated_at: string;
   generation_count: number;
   version: number;
+  is_indexed?: boolean;
   deleted_at?: string;
 }
 

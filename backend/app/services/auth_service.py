@@ -146,6 +146,19 @@ def get_user_grants(db: Session, user_id: str) -> list[FolderGrant]:
     return db.query(FolderGrant).filter(FolderGrant.user_id == user_id).all()
 
 
+def get_all_grants_by_users(db: Session, user_ids: list[str]) -> dict[str, list[FolderGrant]]:
+    """Batch-load grants for multiple users in a single query.
+
+    Returns a dict mapping user_id -> list of FolderGrant.
+    Users with no grants get an empty list.
+    """
+    grants = db.query(FolderGrant).filter(FolderGrant.user_id.in_(user_ids)).all()
+    result: dict[str, list[FolderGrant]] = {uid: [] for uid in user_ids}
+    for grant in grants:
+        result[grant.user_id].append(grant)
+    return result
+
+
 def create_grant(
     db: Session,
     user_id: str,

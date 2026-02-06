@@ -555,6 +555,56 @@ Provide sample data for fresh deployments so new users and evaluators can explor
 
 ---
 
+## T32 — Content Chunk Embeddings for Paragraph-Level RAG (MEDIUM)
+
+**Current state:** The system supports description-level embeddings — one vector per
+document based on its 2-3 sentence summary. This is good for document discovery
+("find documents about authentication") but not for paragraph-level retrieval
+("what's the exact configuration syntax for JWT tokens?").
+
+**Goal:** Add content chunk embeddings so that individual paragraphs/sections within
+a document can be retrieved via semantic search, enabling RAG-quality retrieval.
+
+**Architecture:**
+
+New `document_chunks` table:
+```sql
+CREATE TABLE document_chunks (
+    id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    chunk_text TEXT NOT NULL,
+    chunk_embedding vector(N),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX idx_chunks_doc_id ON document_chunks(doc_id);
+CREATE INDEX idx_chunks_embedding ON document_chunks
+    USING hnsw (chunk_embedding vector_cosine_ops)
+    WHERE chunk_embedding IS NOT NULL;
+```
+
+**Chunking strategy:**
+- Split documents by heading (## boundaries)
+- Each chunk ~300-500 tokens with overlap
+- Store chunk position for context reconstruction
+- Re-chunk on document update (delete old chunks, create new ones)
+
+**Re-ranking:**
+- Initial retrieval: top-50 chunks via vector search
+- Re-rank with cross-encoder model for precision
+- Return top-5 chunks with document context
+
+**Acceptance criteria:**
+- [ ] `document_chunks` table with vector column (PostgreSQL only)
+- [ ] Chunking runs asynchronously after document create/update
+- [ ] `GET /api/docs/search/?mode=chunk` returns paragraph-level results
+- [ ] MCP `search_docs` tool can use chunk-level retrieval
+- [ ] Chunk count visible in document metadata
+- [ ] Re-chunking on content update is idempotent
+- [ ] Cross-encoder re-ranking improves precision vs raw vector search
+
+---
+
 ## Priority Order for "Deploy and Forget" Robustness
 
 **Pre-production (DONE):**
@@ -577,3 +627,4 @@ Provide sample data for fresh deployments so new users and evaluators can explor
 **Remaining:**
 12. T28 — Migration runner (low priority — manual migrations work)
 13. T4, T12, T16, T31 — Feature additions
+14. T32 — Content chunk embeddings (builds on description-level embeddings)

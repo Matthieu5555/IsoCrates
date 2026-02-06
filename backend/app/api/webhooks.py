@@ -59,13 +59,19 @@ async def github_webhook(
     # Read raw body for signature verification
     body = await request.body()
 
-    # Verify signature if secret is configured
+    # Verify signature
     webhook_secret = settings.github_webhook_secret
     if webhook_secret:
         signature = request.headers.get("X-Hub-Signature-256", "")
         if not _verify_github_signature(body, signature, webhook_secret):
             logger.warning("Webhook signature verification failed")
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    elif settings.auth_enabled:
+        # When auth is enabled, unsigned webhooks are a security risk
+        raise HTTPException(
+            status_code=500,
+            detail="GITHUB_WEBHOOK_SECRET must be configured when AUTH_ENABLED=true",
+        )
     else:
         logger.warning("GITHUB_WEBHOOK_SECRET not configured — skipping signature verification")
 

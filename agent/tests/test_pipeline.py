@@ -14,6 +14,7 @@ from tests.fixtures import (
     SAMPLE_BLUEPRINT,
     SAMPLE_DOC_CONTENT,
     SAMPLE_DOC_WITH_BOTTOMATTER,
+    SAMPLE_DOC_WITH_DESCRIPTION_BOTTOMATTER,
     SAMPLE_DOC_WITH_FRONTMATTER,
     SAMPLE_SCOUT_REPORTS,
     make_writer_side_effect,
@@ -341,3 +342,62 @@ class TestGenerateAllFlow:
         assert "human" in result["reason"].lower() or "fresh" in result["reason"].lower()
         # Writer conversation should NOT have been created
         MockConv.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Writer description tests — description fallback chain
+# ---------------------------------------------------------------------------
+
+class TestWriterDescription:
+    """Writer-refined descriptions override planner descriptions."""
+
+    def test_writer_description_preferred(self, generator):
+        """When bottomatter has a description, it appears in the API payload."""
+        gen, MockConv, workspace, notes = generator
+        doc_spec = SAMPLE_BLUEPRINT["documents"][0]
+
+        safe_title = re.sub(r'[^\w\s-]', '', doc_spec["title"]).strip().replace(' ', '-').lower()
+        filename = f"{safe_title}.md"
+
+        conv_instance = MockConv.return_value
+        conv_instance.run.side_effect = make_writer_side_effect(
+            workspace, doc_spec["path"], filename, SAMPLE_DOC_WITH_DESCRIPTION_BOTTOMATTER
+        )
+
+        result = gen.generate_document(
+            doc_spec, SAMPLE_BLUEPRINT,
+            {"all_docs": [], "related_docs": [], "count": 0, "related_count": 0},
+            SAMPLE_SCOUT_REPORTS,
+        )
+
+        assert result["status"] == "success"
+        payload = gen.api_client.create_or_update_document.call_args[1]["doc_data"]
+        # Writer's description from bottomatter should be used
+        assert "high-level overview" in payload["description"]
+        # Planner's description should NOT be used
+        assert payload["description"] != doc_spec["description"]
+
+    def test_planner_description_fallback(self, generator):
+        """When bottomatter has no description, the planner's is used."""
+        gen, MockConv, workspace, notes = generator
+        doc_spec = SAMPLE_BLUEPRINT["documents"][0]
+
+        safe_title = re.sub(r'[^\w\s-]', '', doc_spec["title"]).strip().replace(' ', '-').lower()
+        filename = f"{safe_title}.md"
+
+        # Use content WITHOUT description in bottomatter
+        conv_instance = MockConv.return_value
+        conv_instance.run.side_effect = make_writer_side_effect(
+            workspace, doc_spec["path"], filename, SAMPLE_DOC_WITH_BOTTOMATTER
+        )
+
+        result = gen.generate_document(
+            doc_spec, SAMPLE_BLUEPRINT,
+            {"all_docs": [], "related_docs": [], "count": 0, "related_count": 0},
+            SAMPLE_SCOUT_REPORTS,
+        )
+
+        assert result["status"] == "success"
+        payload = gen.api_client.create_or_update_document.call_args[1]["doc_data"]
+        # Should fall back to planner's description
+        assert payload["description"] == doc_spec["description"]

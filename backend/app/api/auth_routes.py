@@ -102,7 +102,7 @@ from ..core.auth import optional_auth
 def register_user(
     body: RegisterRequest,
     db: Session = Depends(get_db),
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(optional_auth),
 ):
     from ..models.user import User
     from ..exceptions import ForbiddenError
@@ -110,7 +110,7 @@ def register_user(
     real_user_count = db.query(User).filter(User.email.isnot(None)).count()
 
     if real_user_count > 0:
-        if auth is None or not auth.is_admin:
+        if not auth.is_admin:
             raise ForbiddenError("Only admins can register new users")
 
     user = auth_service.register_user(
@@ -187,20 +187,19 @@ def list_users(
     db: Session = Depends(get_db),
 ):
     users = auth_service.list_users(db)
-    result = []
-    for u in users:
-        grants = auth_service.get_user_grants(db, u.user_id)
-        result.append(
-            UserResponse(
-                user_id=u.user_id,
-                display_name=u.display_name,
-                email=u.email,
-                role=u.role,
-                is_active=u.is_active,
-                grants=[GrantResponse(path_prefix=g.path_prefix, role=g.role) for g in grants],
-            )
+    user_ids = [u.user_id for u in users]
+    grants_by_user = auth_service.get_all_grants_by_users(db, user_ids)
+    return [
+        UserResponse(
+            user_id=u.user_id,
+            display_name=u.display_name,
+            email=u.email,
+            role=u.role,
+            is_active=u.is_active,
+            grants=[GrantResponse(path_prefix=g.path_prefix, role=g.role) for g in grants_by_user.get(u.user_id, [])],
         )
-    return result
+        for u in users
+    ]
 
 
 @router.put(

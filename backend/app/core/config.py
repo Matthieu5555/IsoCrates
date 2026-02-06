@@ -77,6 +77,26 @@ class Settings(BaseSettings):
         description="Maximum requests per client per minute"
     )
 
+    # Embedding Configuration (for semantic search)
+    # LiteLLM model string, e.g. "openai/text-embedding-3-small", "cohere/embed-english-v3.0"
+    # Empty string = embeddings disabled (search falls back to FTS only)
+    embedding_model: str = Field(
+        default="",
+        description="LiteLLM model string for embeddings (empty = disabled)"
+    )
+    embedding_api_key: str = Field(
+        default="",
+        description="API key for embedding provider"
+    )
+    embedding_api_base: str = Field(
+        default="",
+        description="Base URL for embedding provider (optional)"
+    )
+    embedding_dimensions: int = Field(
+        default=0,
+        description="Embedding vector dimensions (0 = use model default)"
+    )
+
     # Logging Configuration
     log_level: str = Field(
         default="INFO",

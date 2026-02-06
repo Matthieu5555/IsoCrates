@@ -29,6 +29,8 @@ export interface UseTreeDataReturn {
   loadTree: () => Promise<void>;
   toggleNode: (nodeId: string) => void;
   setExpandedNodes: React.Dispatch<React.SetStateAction<Set<string>>>;
+  /** Optimistically remove a node by ID without refetching. */
+  removeNode: (nodeId: string) => void;
 }
 
 export function useTreeData(): UseTreeDataReturn {
@@ -113,6 +115,18 @@ export function useTreeData(): UseTreeDataReturn {
     });
   }, []);
 
+  const removeNode = useCallback((nodeId: string) => {
+    function filterTree(nodes: TreeNode[]): TreeNode[] {
+      return nodes
+        .filter(n => n.id !== nodeId)
+        .map(n => n.children
+          ? { ...n, children: filterTree(n.children) }
+          : n
+        );
+    }
+    setTree(prev => filterTree(prev));
+  }, []);
+
   return {
     tree,
     loading,
@@ -122,5 +136,6 @@ export function useTreeData(): UseTreeDataReturn {
     loadTree,
     toggleNode,
     setExpandedNodes,
+    removeNode,
   };
 }

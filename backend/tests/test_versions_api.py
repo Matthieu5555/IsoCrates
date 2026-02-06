@@ -26,7 +26,6 @@ class TestVersions:
         assert "version_id" in version
         assert version["doc_id"] == doc_id
 
-    def test_versions_empty_for_nonexistent_doc(self, client):
+    def test_versions_404_for_nonexistent_doc(self, client):
         resp = client.get("/api/docs/doc-nonexistent/versions")
-        assert resp.status_code == 200
-        assert resp.json() == []
+        assert resp.status_code == 404

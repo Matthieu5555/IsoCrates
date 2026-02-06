@@ -149,6 +149,28 @@ class IsoCratesClient:
         )
         return resp.json()["doc_id"]
 
+    async def find_similar(
+        self,
+        doc_id: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Find documents similar to a given document. Maps to GET /api/docs/{doc_id}/similar."""
+        resp = await self._request_with_retry(
+            "GET", f"/api/docs/{doc_id}/similar", params={"limit": limit},
+        )
+        return resp.json()
+
+    async def find_similar_by_text(
+        self,
+        text: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Find documents similar to arbitrary text. Maps to GET /api/docs/similar/."""
+        resp = await self._request_with_retry(
+            "GET", "/api/docs/similar/", params={"text": text, "limit": limit},
+        )
+        return resp.json()
+
     async def close(self) -> None:
         """Close the underlying HTTP client."""
         if self._client and not self._client.is_closed:

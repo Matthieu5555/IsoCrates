@@ -36,11 +36,11 @@ tree_router = APIRouter(tags=["folders"])
 @tree_router.get("/api/tree", response_model=List[TreeNode])
 def get_tree(
     db: Session = Depends(get_db),
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """Get hierarchical navigation tree, filtered by user's folder grants."""
     service = FolderService(db)
-    allowed_prefixes = filter_paths_by_grants(auth.grants) if auth is not None else None
+    allowed_prefixes = filter_paths_by_grants(auth.grants)
     return service.get_tree(allowed_prefixes=allowed_prefixes)
 
 
@@ -66,10 +66,17 @@ def create_folder_metadata(
 
 
 @router.get("/metadata/{folder_id}", response_model=FolderMetadataResponse)
-def get_folder_metadata(folder_id: str, db: Session = Depends(get_db)):
+def get_folder_metadata(
+    folder_id: str,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(optional_auth),
+):
     service = FolderService(db)
     folder = service.get_folder(folder_id)
     if not folder:
+        raise HTTPException(status_code=404, detail=f"Folder metadata not found: {folder_id}")
+    folder_path = getattr(folder, "path", "")
+    if not check_permission(auth.grants, folder_path, "read"):
         raise HTTPException(status_code=404, detail=f"Folder metadata not found: {folder_id}")
     return folder
 
@@ -78,9 +85,11 @@ def get_folder_metadata(folder_id: str, db: Session = Depends(get_db)):
 def list_folder_metadata(
     path_prefix: Optional[str] = Query(None),
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(optional_auth),
 ):
     service = FolderService(db)
-    return service.list_folders(path_prefix)
+    allowed_prefixes = filter_paths_by_grants(auth.grants)
+    return service.list_folders(path_prefix, allowed_prefixes=allowed_prefixes)
 
 
 @router.put("/metadata/{folder_id}", response_model=FolderMetadataResponse)

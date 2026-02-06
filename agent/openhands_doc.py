@@ -21,7 +21,6 @@ Usage:
     python openhands_doc.py --repo https://github.com/user/repo --crate backend/
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -29,7 +28,6 @@ import re
 import sys
 import argparse
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -63,7 +61,6 @@ from prompts import (
     COMPLEXITY_ORDER,
     DOCUMENT_TYPES,
     EXISTING_SUMMARY_TRUNCATION,
-    FILE_HASH_LENGTH,
     PLANNER_OUTPUT_CAP,
     SCOUT_CONDENSER_DIVISOR,
     WRITER_CONDENSER_DIVISOR,
@@ -71,6 +68,8 @@ from prompts import (
     TABLE_REQUIREMENTS,
     DIAGRAM_REQUIREMENTS,
     WIKILINK_REQUIREMENTS,
+    DESCRIPTION_REQUIREMENTS,
+    SELF_CONTAINED_REQUIREMENTS,
 )
 
 # Document registry for ID-based tracking
@@ -93,6 +92,10 @@ from security import RepositoryValidator, PathValidator
 
 # Model constraint resolution
 from model_config import resolve_model_config
+
+# Extracted concerns
+from provenance import ProvenanceTracker
+from writer_pool import WriterPool
 
 # Prevent interactive pagers from trapping agents in git commands
 os.environ.setdefault("GIT_PAGER", "cat")
@@ -292,6 +295,17 @@ class OpenHandsDocGenerator:
             condenser=writer_condenser,
         )
 
+        # Provenance tracker (source file hash/reference tracking)
+        self.provenance = ProvenanceTracker(repo_path=self.repo_path)
+
+        # Writer pool (parallel writer agent creation and orchestration)
+        self.writer_pool = WriterPool(
+            writer_config=self._writer_config,
+            writer_model=WRITER_MODEL,
+            native_tool_calling=LLM_NATIVE_TOOL_CALLING,
+            llm_kwargs_fn=_llm_kwargs,
+        )
+
         # Scout runner
         self.scout_runner = ScoutRunner(
             scout_agent=self.scout_agent,
@@ -481,6 +495,10 @@ PRE-DIGESTED INTELLIGENCE (from repository scouts — filtered for this page):
 
 {WIKILINK_REQUIREMENTS}
 
+{DESCRIPTION_REQUIREMENTS}
+
+{SELF_CONTAINED_REQUIREMENTS}
+
 {doc_context}
 
 {sibling_section}
@@ -512,73 +530,27 @@ OUTPUT:
 - Keep it SHORT — this is one page in a larger wiki
 - Link to other pages liberally using [[Page Title]] for anything worth expanding on
 - Base everything on verified facts from the code you read
+- After writing the content, append a bottomatter block with your description:
+  ---
+  description: Your 2-3 sentence description of what this page actually covers.
+  ---
 - Work AUTONOMOUSLY — do not ask for permission
 """
         return brief
 
     # ------------------------------------------------------------------
-    # Source file provenance tracking
+    # Source file provenance tracking (delegated to ProvenanceTracker)
     # ------------------------------------------------------------------
 
     def _extract_source_references(
         self, content: str, key_files: list[str] | None = None
     ) -> list[str]:
-        """Extract source file paths referenced in generated documentation.
-
-        Looks for:
-          - Code block annotations: ```python title="path/to/file.py"
-          - Inline file references: `path/to/file.py`
-          - key_files_to_read from the doc spec (planner-directed)
-
-        Returns:
-            sorted list of unique relative file paths
-        """
-        refs: set[str] = set()
-
-        # key_files_to_read from the planner spec
-        if key_files:
-            refs.update(key_files)
-
-        # Code block title annotations
-        for match in re.finditer(r'```\w*\s+title="([^"]+)"', content):
-            refs.add(match.group(1))
-
-        # Inline code that looks like file paths (must contain / or end with known ext)
-        for match in re.finditer(r'`([^`]+\.\w{1,4})`', content):
-            candidate = match.group(1)
-            if "/" in candidate or candidate.endswith((".py", ".ts", ".tsx", ".js", ".go", ".rs")):
-                # Skip things that look like code, not paths
-                if " " not in candidate and not candidate.startswith(("http", "/")):
-                    refs.add(candidate)
-
-        # Filter to files that actually exist in the repo
-        valid_refs = []
-        for ref in refs:
-            if (self.repo_path / ref).exists():
-                valid_refs.append(ref)
-
-        return sorted(valid_refs)
+        """Extract source file paths referenced in generated documentation."""
+        return self.provenance.extract_source_references(content, key_files)
 
     def _compute_source_hashes(self, file_paths: list[str]) -> dict[str, str]:
-        """Compute SHA-256 hashes of source files for change detection.
-
-        Args:
-            file_paths: relative paths within self.repo_path
-
-        Returns:
-            dict mapping relative_path → sha256_hex (first 16 chars)
-        """
-        hashes = {}
-        for fpath in file_paths:
-            full = self.repo_path / fpath
-            if not full.exists():
-                continue
-            try:
-                content = full.read_bytes()
-                hashes[fpath] = hashlib.sha256(content).hexdigest()[:FILE_HASH_LENGTH]
-            except OSError:
-                logger.debug("Could not hash file: %s", fpath)
-        return hashes
+        """Compute SHA-256 hashes of source files for change detection."""
+        return self.provenance.compute_source_hashes(file_paths)
 
     # ------------------------------------------------------------------
     # Orphan cleanup
@@ -758,6 +730,8 @@ OUTPUT:
             if not metadata:
                 metadata, body = parse_frontmatter(raw_content)
 
+            writer_description = (metadata or {}).get("description", "")
+
             body = re.sub(r"^\*Documentation Written by.*?\*\n+", "", body)
             clean_content = re.sub(
                 r"\n---\n\n\*Documentation.*$", "", body, flags=re.DOTALL
@@ -803,6 +777,7 @@ OUTPUT:
                 "title": api_title,
                 "doc_type": doc_type,
                 "content": clean_content,
+                "description": writer_description or doc_spec.get("description", ""),
                 "keywords": keywords,
                 "author_type": "ai",
                 "author_metadata": {
@@ -854,38 +829,12 @@ OUTPUT:
             return {"status": "error", "error": str(e), "resolved_from": resolved_from}
 
     # ------------------------------------------------------------------
-    # Parallel writer support
+    # Parallel writer support (delegated to WriterPool)
     # ------------------------------------------------------------------
 
     def _create_writer_agent(self) -> Agent:
-        """Create an independent Writer Agent + LLM for thread-safe parallel use.
-
-        Each parallel writer thread needs its own Agent/LLM/Condenser
-        to avoid shared state between concurrent conversations.
-        """
-        writer_kwargs = _llm_kwargs("WRITER")
-        llm = LLM(
-            model=WRITER_MODEL,
-            native_tool_calling=LLM_NATIVE_TOOL_CALLING,
-            timeout=900,
-            max_output_tokens=self._writer_config.max_output_tokens,
-            litellm_extra_body=self._writer_config.extra_body or {},
-            **self._writer_config.extra_llm_kwargs,
-            **writer_kwargs,
-        )
-        condenser_size = max(20, self._writer_config.context_window // 4000)
-        condenser = LLMSummarizingCondenser(
-            llm=llm, max_size=condenser_size, keep_first=2,
-        )
-        return Agent(
-            llm=llm,
-            tools=[
-                Tool(name=TerminalTool.name),
-                Tool(name=FileEditorTool.name),
-                Tool(name=TaskTrackerTool.name),
-            ],
-            condenser=condenser,
-        )
+        """Create an independent Writer Agent + LLM for thread-safe parallel use."""
+        return self.writer_pool.create_writer_agent()
 
     def _run_writers_parallel(
         self,
@@ -899,82 +848,24 @@ OUTPUT:
     ) -> tuple[dict[str, dict], set, set, dict]:
         """Run writer agents in parallel using ThreadPoolExecutor.
 
-        Writers are divided into two waves:
-          Wave 1: Detail/leaf pages (can all run in parallel)
-          Wave 2: Hub pages (overview, capabilities, quickstart) — run after
-                  wave 1 completes since they link to everything
-
         Returns:
             (results_dict, generated_ids, failed_ids, id_stats)
         """
-        _HUB_TYPES = {"overview", "capabilities", "quickstart"}
-        detail_docs = [d for d in documents if d.get("doc_type") not in _HUB_TYPES]
-        hub_docs = [d for d in documents if d.get("doc_type") in _HUB_TYPES]
-
-        results: dict[str, dict] = {}
-        generated_ids: set = set()
-        failed_ids: set = set()
-        id_stats = {"reused": 0, "new": 0, "renamed": 0}
-        total = len(documents)
-
-        def _process_result(doc_title: str, result: dict) -> None:
-            """Track a single result (called from main thread)."""
-            results[doc_title] = result
-            doc_id = result.get("doc_id")
-            if doc_id:
-                status = result.get("status", "")
-                if status in ("success", "skipped"):
-                    generated_ids.add(doc_id)
-                elif status in ("error", "error_fallback", "warning"):
-                    failed_ids.add(doc_id)
-            resolved = result.get("resolved_from", "")
-            if "replaces:" in resolved:
-                id_stats["renamed"] += 1
-            elif "title match:" in resolved:
-                id_stats["reused"] += 1
-            else:
-                id_stats["new"] += 1
-
-        def _run_one(doc_spec: dict, idx: int, agent: Agent) -> tuple[str, dict]:
-            """Run a single writer in a thread. Returns (title, result)."""
-            print(f"\n[{idx}/{total}] Dispatching writer for: {doc_spec['title']}")
-            result = self.generate_document(
+        # Build a closure that adapts generate_document to the signature
+        # expected by WriterPool.run_parallel: (doc_spec, agent) -> result
+        def _generate_fn(doc_spec: dict, writer_agent: Agent | None) -> dict:
+            return self.generate_document(
                 doc_spec, blueprint, discovery, scout_reports,
                 title_to_doc_id=title_to_doc_id,
                 snapshot_by_id=snapshot_by_id,
-                writer_agent=agent,
+                writer_agent=writer_agent,
             )
-            return doc_spec["title"], result
 
-        # Wave 1: Detail pages in parallel
-        if detail_docs:
-            print(f"\n[Wave 1] {len(detail_docs)} detail pages (max {max_workers} parallel)...")
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {}
-                for idx, doc_spec in enumerate(detail_docs, 1):
-                    agent = self._create_writer_agent()
-                    future = executor.submit(_run_one, doc_spec, idx, agent)
-                    futures[future] = doc_spec["title"]
-
-                for future in as_completed(futures):
-                    try:
-                        title, result = future.result()
-                        _process_result(title, result)
-                    except Exception as e:
-                        title = futures[future]
-                        logger.error("Writer thread failed for %s: %s", title, e)
-                        _process_result(title, {"status": "error", "error": str(e)})
-
-        # Wave 2: Hub pages after detail pages complete (they reference everything)
-        if hub_docs:
-            offset = len(detail_docs)
-            print(f"\n[Wave 2] {len(hub_docs)} hub pages (sequential, after detail pages)...")
-            for idx, doc_spec in enumerate(hub_docs, offset + 1):
-                agent = self._create_writer_agent()
-                title, result = _run_one(doc_spec, idx, agent)
-                _process_result(title, result)
-
-        return results, generated_ids, failed_ids, id_stats
+        return self.writer_pool.run_parallel(
+            documents=documents,
+            generate_fn=_generate_fn,
+            max_workers=max_workers,
+        )
 
     def generate_all(self, force: bool = False) -> dict:
         """

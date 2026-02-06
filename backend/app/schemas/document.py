@@ -14,6 +14,7 @@ class DocumentBase(BaseModel):
     content: str
     doc_type: str = ""  # Legacy field
     keywords: List[str] = []  # User-editable classification tags
+    description: Optional[str] = None  # AI-generated 2-3 sentence summary
 
     @field_validator('path')
     @classmethod
@@ -59,6 +60,7 @@ class DocumentCreate(DocumentBase):
 class DocumentUpdate(BaseModel):
     """Schema for updating a document."""
     content: str
+    description: Optional[str] = None
     author_type: str = "ai"
     author_metadata: Optional[dict] = None
     version: Optional[int] = None  # Required for conflict detection; omit to skip check
@@ -97,11 +99,24 @@ class SearchResultResponse(BaseModel):
     title: str
     doc_type: str = ""
     keywords: List[str] = []
+    description: Optional[str] = None
     content_preview: Optional[str] = None
     updated_at: datetime
     generation_count: int
     rank: float = 0.0
     snippet: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SimilarDocumentResponse(BaseModel):
+    """A document similar to a given query or document."""
+    id: str
+    title: str
+    path: str
+    description: Optional[str] = None
+    similarity_score: float = 0.0
 
     class Config:
         from_attributes = True
@@ -114,11 +129,23 @@ class BrokenLinkResponse(BaseModel):
     resolved_doc_id: Optional[str] = None
 
 
+class BatchParams(BaseModel):
+    """Typed parameters for batch operations.
+
+    Each field corresponds to a specific operation type:
+    - target_path: required for 'move'
+    - keywords: required for 'add_keywords' and 'remove_keywords'
+    Unused fields are ignored for the given operation.
+    """
+    target_path: str = ""
+    keywords: List[str] = []
+
+
 class BatchOperation(BaseModel):
     """Batch operation on multiple documents."""
     operation: str  # "move", "delete", "add_keywords", "remove_keywords"
     doc_ids: List[str]
-    params: dict = {}
+    params: BatchParams = BatchParams()
 
 
 class BatchError(BaseModel):
@@ -157,6 +184,7 @@ class DocumentResponse(DocumentBase):
     generation_count: int
     version: int = 1
     deleted_at: Optional[datetime] = None
+    is_indexed: bool = False
 
     class Config:
         from_attributes = True
@@ -170,11 +198,13 @@ class DocumentListResponse(BaseModel):
     title: str
     doc_type: str = ""
     keywords: List[str] = []
+    description: Optional[str] = None
     content_preview: Optional[str] = None
     updated_at: datetime
     generation_count: int
     version: int = 1
     deleted_at: Optional[datetime] = None
+    is_indexed: bool = False
 
     class Config:
         from_attributes = True

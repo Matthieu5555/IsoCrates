@@ -72,15 +72,38 @@ EXISTING_SUMMARY_TRUNCATION: int = 3000
 # ---------------------------------------------------------------------------
 
 PROSE_REQUIREMENTS: str = """
-WRITING STYLE (ABSOLUTELY MANDATORY):
+WRITING STYLE (ABSOLUTELY MANDATORY — HARD FAILURE IF VIOLATED):
 
 Write professional, concise technical documentation. Each page should be
 SHORT — 1-2 printed pages maximum. Think wiki page, not book chapter.
 
 Use flowing prose paragraphs of 2-4 sentences. Use transition words to
-connect ideas. NEVER use bullet points or dashes for descriptions — weave
-items into sentences. Code blocks and tables are acceptable but surround
-them with brief explanatory prose.
+connect ideas. Code blocks and tables are acceptable but surround them
+with brief explanatory prose.
+
+BULLET POINTS AND DASHES ARE BANNED. This is not a suggestion — it is an
+absolute rule. Do NOT use bullet points (-, *, •) for descriptions,
+explanations, feature lists, comparisons, summaries, or ANY other purpose.
+Weave items into sentences and paragraphs. If you catch yourself reaching
+for a bullet point, rewrite it as prose. Tables are the alternative for
+structured data, prose paragraphs for everything else.
+
+THE ONLY EXCEPTION — and it is extremely narrow — is numbered lists (1. 2. 3.)
+for sequential steps where ALL of the following conditions are true:
+  1. The page is a quickstart, getting-started, or how-to guide
+  2. Each step is a concrete ACTION the reader must perform in order
+  3. Most steps contain a terminal command or a specific UI action
+  4. The steps MUST be performed in this exact sequence to succeed
+
+If even one of these conditions is false, use prose. "First, install the
+dependencies with `npm install`. Next, configure the environment by copying
+`.env.example` to `.env`." is always acceptable and often reads better than
+a numbered list. When in doubt, use prose — numbered lists are a last resort
+for genuinely sequential procedures, not a formatting convenience.
+
+Violating this rule — using bullet points anywhere, or using numbered lists
+outside of sequential procedures in quickstart/guide pages — is a hard
+failure that invalidates the entire page.
 
 If a topic is too large for 1-2 pages, split it into sub-pages and link
 to them with [[wikilinks]]. Prefer many small focused pages over few
@@ -163,6 +186,58 @@ EXTERNAL LINKS vs WIKILINKS:
   RULE: If the concept is NOT in the list of wiki pages provided to you,
   it MUST be a standard markdown link [text](url) with an actual URL.
   Do NOT create wikilinks for external tools, libraries, or resources.
+"""
+
+DESCRIPTION_REQUIREMENTS: str = """
+DESCRIPTION (MUST include in bottomatter):
+
+After writing the page, write a 2-3 sentence description of what this page
+actually covers. This description is stored in the database and used by
+MCP tools, semantic search, and document listings — it must accurately
+reflect the CONTENT YOU WROTE, not a guess about what the page might contain.
+
+Write the description as if explaining to a colleague: "This page covers X,
+including Y and Z. It is aimed at [audience]."
+
+Place the description in a bottomatter block at the very end of your file:
+
+---
+description: Your 2-3 sentence description here.
+---
+
+The bottomatter block MUST be the last thing in the file. Put a blank line
+before the opening --- separator. The description MUST be on a single line
+(no line breaks within the value).
+"""
+
+SELF_CONTAINED_REQUIREMENTS: str = """
+SELF-CONTAINED PAGES (every page must stand alone):
+
+Every page in this wiki must be independently understandable. Readers arrive
+via search, MCP tool retrieval, or direct wikilink — they have NOT read any
+other page first.
+
+RULES:
+  Do NOT use phrases like "as mentioned above", "as described earlier",
+  "as we saw in the previous section", "see above", or "as noted before."
+  These phrases assume a reading order that does not exist in a wiki.
+
+  When referencing a concept from another page, provide a brief inline
+  definition (one sentence) BEFORE the wikilink. Example:
+    GOOD: "The system uses the repository pattern — a data access
+           abstraction that decouples business logic from storage — as
+           implemented in the [[Document Repository]]."
+    BAD:  "The system uses the repository pattern (see [[Document Repository]])."
+
+  Each page must define its own context in the first paragraph: what this
+  page covers, what system or component it belongs to, and who it is for.
+
+  Do NOT assume the reader knows the project's tech stack, architecture,
+  or terminology without brief inline explanation on first use.
+
+  Wikilinks are navigation aids, not substitutes for explanation. A wikilink
+  supplements a sentence — it never replaces the information the reader
+  needs to understand THIS page.
 """
 
 

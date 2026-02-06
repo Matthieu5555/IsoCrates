@@ -39,6 +39,11 @@ class Document(Base):
     content = Column(Text, nullable=False)
     content_preview = Column(Text)  # First 500 chars for quick display
 
+    # AI-generated summary for semantic search and MCP discovery
+    description = Column(Text, nullable=True)
+    # Tracks which embedding model was used (for re-indexing detection)
+    embedding_model = Column(String, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -67,6 +72,11 @@ class Document(Base):
         back_populates="to_document",
         cascade="all, delete-orphan"
     )
+
+    @property
+    def is_indexed(self) -> bool:
+        """Whether this document has been embedded for semantic search."""
+        return bool(self.embedding_model)
 
     @property
     def source_type(self) -> str:

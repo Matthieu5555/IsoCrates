@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { Plus, FileText, Folder, FolderOpen, Layers, RefreshCw, Clock, Loader2, CheckCircle2, XCircle } from 'lucide-react';
-import { deleteDocument, createDocument, createFolderMetadata, deleteFolder, type CreateDocumentData, type CreateFolderMetadataData } from '@/lib/api/documents';
+import { Plus, FileText, Folder, RefreshCw } from 'lucide-react';
+import { deleteDocument, createDocument, createFolderMetadata, deleteFolder, type CreateDocumentData } from '@/lib/api/documents';
 import { getApiErrorMessage } from '@/lib/api/client';
 import type { TreeNode } from '@/types';
 import { ContextMenu } from './ContextMenu';
+import { TreeNodeRow } from './TreeNodeRow';
 import { NewDocumentDialog } from './dialogs/NewDocumentDialog';
 import { NewFolderDialog } from './dialogs/NewFolderDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
@@ -14,13 +15,13 @@ import { DeleteFolderDialog } from './dialogs/DeleteFolderDialog';
 import { FolderPickerDialog } from './dialogs/FolderPickerDialog';
 import { BulkActionBar } from './BulkActionBar';
 import { executeBatch } from '@/lib/api/documents';
-import { buttonVariants, iconVariants, overlayVariants } from '@/lib/styles/button-variants';
+import { buttonVariants, overlayVariants } from '@/lib/styles/button-variants';
 import { toast } from '@/lib/notifications/toast';
 import { useUIStore } from '@/lib/store/uiStore';
 import { useTreeData } from '@/hooks/useTreeData';
 import { useTreeDragDrop } from '@/hooks/useTreeDragDrop';
 import { useTreeSelection } from '@/hooks/useTreeSelection';
-import { INDENT_PER_LEVEL, NODE_BASE_PADDING } from '@/lib/config/tree-constants';
+import { useTreeDialogs } from '@/hooks/useTreeDialogs';
 
 export function DocumentTree() {
   const router = useRouter();
@@ -35,6 +36,7 @@ export function DocumentTree() {
     loadTree,
     toggleNode,
     setExpandedNodes,
+    removeNode,
   } = useTreeData();
 
   const {
@@ -59,22 +61,32 @@ export function DocumentTree() {
     clearSelection,
   } = useTreeSelection();
 
-  // --- Local dialog/context-menu state ---
-  const [contextMenu, setContextMenu] = useState<{
-    x: number; y: number; node: TreeNode;
-  } | null>(null);
+  // --- Dialog/context-menu state (extracted hook) ---
+  const {
+    contextMenu,
+    setContextMenu,
+    newDocDialogOpen,
+    setNewDocDialogOpen,
+    newFolderDialogOpen,
+    setNewFolderDialogOpen,
+    deleteConfirmOpen,
+    setDeleteConfirmOpen,
+    deleteFolderDialogOpen,
+    setDeleteFolderDialogOpen,
+    selectedNode,
+    setSelectedNode,
+    defaultPath,
+    folderPickerOpen,
+    setFolderPickerOpen,
+    handleDeleteClick,
+    handleNewDocClick,
+    handleNewFolderClick,
+    closeContextMenu,
+  } = useTreeDialogs();
 
-  const [newDocDialogOpen, setNewDocDialogOpen] = useState(false);
-  const [newFolderDialogOpen, setNewFolderDialogOpen] = useState(false);
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [deleteFolderDialogOpen, setDeleteFolderDialogOpen] = useState(false);
-  const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
-  const [defaultPath, setDefaultPath] = useState('');
-  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  // --- Event handlers (stable refs for memoized TreeNodeRow) ---
 
-  // --- Event handlers ---
-
-  function handleNodeClick(node: TreeNode, e?: React.MouseEvent) {
+  const handleNodeClick = useCallback((node: TreeNode, e?: React.MouseEvent) => {
     const result = handleSelect(node, e);
     if (result === 'selected') return;
 
@@ -83,29 +95,18 @@ export function DocumentTree() {
     } else {
       toggleNode(node.id);
     }
-  }
+  }, [handleSelect, router, toggleNode]);
 
-  function handleContextMenu(e: React.MouseEvent, node: TreeNode) {
+  const handleContextMenu = useCallback((e: React.MouseEvent, node: TreeNode) => {
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY, node });
-  }
-
-  function handleDeleteClick(node: TreeNode) {
-    setSelectedNode(node);
-    if (node.type === 'folder') {
-      setDeleteFolderDialogOpen(true);
-    } else {
-      setDeleteConfirmOpen(true);
-    }
-  }
+  }, []);
 
   function countDocumentsInTree(node: TreeNode): number {
-    let count = 0;
     if (node.type === 'document') return 1;
+    let count = 0;
     if (node.children) {
-      for (const child of node.children) {
-        count += countDocumentsInTree(child);
-      }
+      for (const child of node.children) count += countDocumentsInTree(child);
     }
     return count;
   }
@@ -133,25 +134,16 @@ export function DocumentTree() {
     try {
       if (selectedNode.type === 'document') {
         await deleteDocument(selectedNode.id);
+        // Optimistic removal: update local tree immediately instead of full refetch
+        removeNode(selectedNode.id);
         useUIStore.getState().setTrashCount(useUIStore.getState().trashCount + 1);
         toast.success('Moved to trash', 'Document can be restored from the Trash');
       }
-      await loadTree();
       setDeleteConfirmOpen(false);
       setSelectedNode(null);
     } catch (err) {
       toast.error('Delete failed', getApiErrorMessage(err));
     }
-  }
-
-  function handleNewDocClick(path?: string) {
-    setDefaultPath(path || '');
-    setNewDocDialogOpen(true);
-  }
-
-  function handleNewFolderClick(path?: string) {
-    setDefaultPath(path || '');
-    setNewFolderDialogOpen(true);
   }
 
   async function handleCreateDocument(data: {
@@ -195,124 +187,6 @@ export function DocumentTree() {
         toast.error('Create failed', 'An unexpected error occurred');
       }
     }
-  }
-
-  // --- Helpers ---
-
-  function getNodeTooltip(node: TreeNode): string {
-    const parts: string[] = [];
-    if (node.type === 'folder' && node.description) parts.push(node.description);
-    if (node.path) parts.push(`Path: ${node.path}`);
-    if (node.children && node.children.length > 0) {
-      parts.push(`${countDocumentsInTree(node)} document(s)`);
-    }
-    return parts.join(' \u2022 ');
-  }
-
-  // --- Render ---
-
-  function renderNode(node: TreeNode, level = 0) {
-    const isExpanded = expandedNodes.has(node.id);
-    const hasChildren = node.children && node.children.length > 0;
-    const indent = level * INDENT_PER_LEVEL;
-    const isDropTarget = dropTargetId === node.id;
-    const isSelected = selectedIds.has(node.id);
-    const tooltip = getNodeTooltip(node);
-
-    return (
-      <div key={node.id}>
-        <div>
-          <button
-            onClick={(e) => handleNodeClick(node, e)}
-            onContextMenu={(e) => handleContextMenu(e, node)}
-            draggable={true}
-            onDragStart={(e) => handleDragStart(e, node)}
-            onDragOver={(e) => handleDragOver(e, node)}
-            onDragLeave={handleDragLeave}
-            onDrop={(e) => handleDrop(e, node)}
-            onDragEnd={handleDragEnd}
-            title={tooltip}
-            className={`w-full text-left px-3 py-2 hover:bg-muted rounded text-sm flex items-center gap-2 transition-colors ${
-              isDropTarget ? overlayVariants.dropTarget : ''
-            } ${isSelected ? 'bg-primary/10 ring-1 ring-primary/30' : ''} cursor-grab active:cursor-grabbing`}
-            style={{ paddingLeft: `${indent + NODE_BASE_PADDING}px` }}
-          >
-            {hasChildren && (
-              <span className="text-xs w-3">
-                {isExpanded ? '\u25BC' : '\u25B6'}
-              </span>
-            )}
-            {!hasChildren && <span className="w-3" />}
-            {node.type === 'folder' && node.is_crate && (
-              <Layers className={iconVariants.folderCrate} />
-            )}
-            {node.type === 'folder' && !node.is_crate && (
-              isExpanded ? (
-                <FolderOpen className={iconVariants.folder} />
-              ) : (
-                <Folder className={iconVariants.folder} />
-              )
-            )}
-            {node.type === 'document' && (
-              <FileText className={iconVariants.document} />
-            )}
-            <span className="flex-1 truncate">{node.name}</span>
-            {node.type === 'folder' && hasChildren && (
-              <span className="text-xs text-muted-foreground px-2 py-0.5 rounded bg-muted">
-                {countDocumentsInTree(node)}
-              </span>
-            )}
-            {node.type === 'folder' && !hasChildren && (
-              <span className="text-xs text-muted-foreground px-2 py-0.5 rounded bg-muted/50 italic">
-                empty
-              </span>
-            )}
-            {node.type === 'folder' && node.is_crate && (() => {
-              // Find generation status for this crate by checking all repo_urls
-              const entry = Object.entries(generationStatus).find(
-                ([repoUrl]) => repoUrl.includes(node.name)
-              );
-              if (!entry) return null;
-              const [, jobStatus] = entry;
-              if (jobStatus.status === 'running') {
-                return <span title="Generating..."><Loader2 className="h-3 w-3 text-blue-500 animate-spin" /></span>;
-              }
-              if (jobStatus.status === 'queued') {
-                return <span title="Queued for regeneration"><Clock className="h-3 w-3 text-amber-500" /></span>;
-              }
-              if (jobStatus.status === 'completed' && jobStatus.completed_at) {
-                const date = new Date(jobStatus.completed_at);
-                return (
-                  <span className="text-xs text-muted-foreground" title={`Last generated: ${date.toLocaleString()}`}>
-                    <CheckCircle2 className="h-3 w-3 text-green-500 inline" />
-                  </span>
-                );
-              }
-              if (jobStatus.status === 'failed') {
-                const errorDetail = jobStatus.error_message
-                  ? `Generation failed:\n${jobStatus.error_message}`
-                  : 'Generation failed (no error details available)';
-                return <span title={errorDetail}><XCircle className="h-3 w-3 text-red-500" /></span>;
-              }
-              return null;
-            })()}
-          </button>
-          {node.type === 'folder' && node.description && (
-            <div
-              className="text-xs text-muted-foreground px-3 pb-1 italic"
-              style={{ paddingLeft: `${indent + NODE_BASE_PADDING + 24}px` }}
-            >
-              {node.description}
-            </div>
-          )}
-        </div>
-        {hasChildren && isExpanded && (
-          <div>
-            {node.children?.map(child => renderNode(child, level + 1))}
-          </div>
-        )}
-      </div>
-    );
   }
 
   if (loading) {
@@ -376,7 +250,24 @@ export function DocumentTree() {
         onDragLeave={handleRootDragLeave}
         onDrop={handleRootDrop}
       >
-        {tree.map(node => renderNode(node))}
+        {tree.map(node => (
+          <TreeNodeRow
+            key={node.id}
+            node={node}
+            level={0}
+            expandedNodes={expandedNodes}
+            dropTargetId={dropTargetId}
+            selectedIds={selectedIds}
+            generationStatus={generationStatus}
+            onNodeClick={handleNodeClick}
+            onContextMenu={handleContextMenu}
+            onDragStart={handleDragStart}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onDragEnd={handleDragEnd}
+          />
+        ))}
 
         {/* Visual hint for root drop */}
         {draggedNode && (
@@ -393,7 +284,7 @@ export function DocumentTree() {
           x={contextMenu.x}
           y={contextMenu.y}
           nodeType={contextMenu.node.type}
-          onClose={() => setContextMenu(null)}
+          onClose={closeContextMenu}
           onDelete={() => handleDeleteClick(contextMenu.node)}
           onNewDocument={() => {
             const path = contextMenu.node.path || '';

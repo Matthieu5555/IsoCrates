@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from ..database import get_db
-from ..core.auth import require_auth, AuthContext
+from ..core.auth import AuthContext, require_auth, optional_auth
 from ..schemas.webhook import GenerationJobResponse, ManualJobRequest
 from ..services.job_service import JobService
 
@@ -37,7 +37,8 @@ def create_job(
 def list_jobs(
     repo_url: Optional[str] = Query(None),
     limit: int = Query(10, ge=1, le=100),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """List generation jobs, optionally filtered by repository URL."""
     service = JobService(db)
@@ -58,7 +59,8 @@ def list_jobs(
 @router.get("/{job_id}", response_model=GenerationJobResponse)
 def get_job(
     job_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """Get a specific generation job by ID."""
     service = JobService(db)

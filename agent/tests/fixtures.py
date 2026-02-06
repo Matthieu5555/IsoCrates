@@ -20,6 +20,7 @@ SAMPLE_BLUEPRINT = {
             "doc_type": "overview",
             "title": "Overview",
             "path": "IsoCrates",
+            "description": "Planner-generated overview description.",
             "rationale": "Index page",
             "sections": [
                 {"heading": "What is IsoCrates?", "format_rationale": "Prose + diagram", "rich_content": ["diagram:system overview"]},
@@ -32,6 +33,7 @@ SAMPLE_BLUEPRINT = {
             "doc_type": "architecture",
             "title": "Backend Architecture",
             "path": "IsoCrates/architecture/backend",
+            "description": "Planner-generated architecture description.",
             "rationale": "Backend deep-dive",
             "sections": [
                 {"heading": "Layers", "format_rationale": "Diagram", "rich_content": ["diagram:layers"]},
@@ -89,6 +91,15 @@ SAMPLE_DOC_WITH_BOTTOMATTER = SAMPLE_DOC_CONTENT + """
 id: doc-abc123-def456
 repo_url: https://github.com/test/repo
 doc_type: overview
+---
+"""
+
+SAMPLE_DOC_WITH_DESCRIPTION_BOTTOMATTER = SAMPLE_DOC_CONTENT + """
+---
+id: doc-abc123-def456
+repo_url: https://github.com/test/repo
+doc_type: overview
+description: This page provides a high-level overview of IsoCrates, covering its three main components (backend, frontend, agent) and how they interact. It is aimed at new team members orienting themselves in the codebase.
 ---
 """
 

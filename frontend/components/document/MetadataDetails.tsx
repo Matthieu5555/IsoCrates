@@ -228,9 +228,25 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
             <td className={`${tableVariants.cell} font-medium text-muted-foreground`}>Last Updated</td>
             <td className={tableVariants.cell}>{mounted ? formatDateTime(document.updated_at) : 'Loading...'}</td>
           </tr>
-          <tr>
+          <tr className={tableVariants.row}>
             <td className={`${tableVariants.cell} font-medium text-muted-foreground`}>Generation Count</td>
             <td className={tableVariants.cell}>{document.generation_count}</td>
+          </tr>
+          <tr>
+            <td className={`${tableVariants.cell} font-medium text-muted-foreground`}>Search Index</td>
+            <td className={tableVariants.cell}>
+              {document.is_indexed ? (
+                <span className="inline-flex items-center gap-1.5 text-green-600 dark:text-green-400">
+                  <span className="h-2 w-2 rounded-full bg-green-500 inline-block" />
+                  Indexed
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                  <span className="h-2 w-2 rounded-full bg-muted-foreground/40 inline-block" />
+                  Not indexed
+                </span>
+              )}
+            </td>
           </tr>
         </tbody>
       </table>

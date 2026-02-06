@@ -201,27 +201,46 @@ class ScoutRunner:
                 constraints=build_constraints(budget_ratio),
             )
 
-            try:
-                conversation = self._Conversation(
-                    agent=self.scout_agent,
-                    workspace=str(self.repo_path),
-                    max_iteration_per_run=self._max_iters,
-                )
-                conversation.send_message(prompt)
-                conversation.run()
+            # Retry once on failure with a brief pause before the second attempt.
+            max_attempts = 2
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    conversation = self._Conversation(
+                        agent=self.scout_agent,
+                        workspace=str(self.repo_path),
+                        max_iteration_per_run=self._max_iters,
+                    )
+                    conversation.send_message(prompt)
+                    conversation.run()
 
-                if report_path.exists():
-                    report_text = report_path.read_text()
-                    reports[scout_key] = report_text
-                    lines = len(report_text.strip().split("\n"))
-                    print(f"   [Done] {scout_def['name']}: {lines} lines")
-                else:
-                    print(f"   [Warning] Scout {scout_key} did not produce a report")
-                    reports[scout_key] = f"## Scout Report: {scout_def['name']}\n### Key Findings\nNo report produced.\n"
+                    if report_path.exists():
+                        report_text = report_path.read_text()
+                        reports[scout_key] = report_text
+                        lines = len(report_text.strip().split("\n"))
+                        print(f"   [Done] {scout_def['name']}: {lines} lines")
+                    else:
+                        print(f"   [Warning] Scout {scout_key} did not produce a report")
+                        reports[scout_key] = (
+                            f"## Scout Report: {scout_def['name']}\n"
+                            f"### Key Findings\nNo report produced.\n"
+                            f"### Status: INCOMPLETE\n"
+                        )
+                    break  # success — no retry needed
 
-            except Exception as e:
-                logger.error("Scout %s failed: %s", scout_key, e)
-                reports[scout_key] = f"## Scout Report: {scout_def['name']}\n### Key Findings\nScout failed: {e}\n"
+                except Exception as e:
+                    if attempt < max_attempts:
+                        import time
+                        wait = 2 ** attempt  # 2s, then 4s
+                        logger.warning("Scout %s attempt %d failed, retrying in %ds: %s", scout_key, attempt, wait, e)
+                        print(f"   [Retry] {scout_def['name']} failed, retrying in {wait}s...")
+                        time.sleep(wait)
+                    else:
+                        logger.error("Scout %s failed after %d attempts: %s", scout_key, max_attempts, e)
+                        reports[scout_key] = (
+                            f"## Scout Report: {scout_def['name']}\n"
+                            f"### Key Findings\nScout failed after {max_attempts} attempts: {e}\n"
+                            f"### Status: FAILED\n"
+                        )
 
         return reports
 

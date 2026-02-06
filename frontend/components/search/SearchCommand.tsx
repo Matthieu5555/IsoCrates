@@ -262,7 +262,11 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
                             </span>
                           )}
                         </div>
-                        {snippet ? (
+                        {doc.description ? (
+                          <p className="text-xs text-muted-foreground line-clamp-2">
+                            {doc.description}
+                          </p>
+                        ) : snippet ? (
                           <p
                             className="text-xs text-muted-foreground line-clamp-2"
                             dangerouslySetInnerHTML={{ __html: snippet.replace(/<(?!\/?mark\b)[^>]*>/gi, '') }}

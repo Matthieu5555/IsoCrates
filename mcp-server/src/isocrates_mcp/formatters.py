@@ -11,6 +11,7 @@ def format_search_results(results: list[dict]) -> str:
         title = r.get("title", "Untitled")
         path = r.get("path", "")
         doc_id = r.get("id", "")
+        description = r.get("description") or ""
         snippet = r.get("snippet") or r.get("content_preview") or ""
         keywords = ", ".join(r.get("keywords", []))
 
@@ -19,8 +20,10 @@ def format_search_results(results: list[dict]) -> str:
         lines.append(f"- **ID:** `{doc_id}`")
         if keywords:
             lines.append(f"- **Keywords:** {keywords}")
-        if snippet:
-            # Truncate long snippets
+        if description:
+            lines.append(f"- **Description:** {description}")
+        elif snippet:
+            # Fall back to snippet when no description available
             text = snippet[:500].rstrip()
             lines.append(f"- **Snippet:** {text}")
         lines.append("")
@@ -33,6 +36,7 @@ def format_document(doc: dict) -> str:
     path = doc.get("path", "")
     doc_id = doc.get("id", "")
     content = doc.get("content", "")
+    description = doc.get("description") or ""
     keywords = ", ".join(doc.get("keywords", []))
     updated = doc.get("updated_at", "")
     doc_type = doc.get("doc_type", "")
@@ -46,13 +50,15 @@ def format_document(doc: dict) -> str:
         header.append(f"**Keywords:** {keywords}  ")
     if updated:
         header.append(f"**Updated:** {updated}  ")
+    if description:
+        header.append(f"\n> {description}\n")
     header.append("\n---\n")
     header.append(content)
     return "\n".join(header)
 
 
 def format_document_list(docs: list[dict]) -> str:
-    """Format a document list with titles, paths, and content previews."""
+    """Format a document list with titles, paths, and descriptions."""
     if not docs:
         return "No documents found."
 
@@ -63,6 +69,7 @@ def format_document_list(docs: list[dict]) -> str:
         doc_id = doc.get("id", "")
         doc_type = doc.get("doc_type", "")
         updated = (doc.get("updated_at") or "")[:10]
+        description = doc.get("description") or ""
         preview = doc.get("content_preview") or ""
 
         lines.append(f"### {i}. {title}")
@@ -71,8 +78,32 @@ def format_document_list(docs: list[dict]) -> str:
         if doc_type:
             lines.append(f"- **Type:** {doc_type}")
         lines.append(f"- **Updated:** {updated}")
-        if preview:
+        if description:
+            lines.append(f"- **Description:** {description}")
+        elif preview:
             lines.append(f"- **Preview:** {preview[:200].rstrip()}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def format_similar_results(results: list[dict]) -> str:
+    """Format similar-document results with similarity scores."""
+    if not results:
+        return "No similar documents found. Embeddings may not be configured."
+
+    lines = [f"Found {len(results)} similar document(s):\n"]
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "Untitled")
+        path = r.get("path", "")
+        doc_id = r.get("id", "")
+        description = r.get("description") or ""
+        score = r.get("similarity_score", 0)
+
+        lines.append(f"### {i}. {title} (similarity: {score:.2f})")
+        lines.append(f"- **Path:** {path}")
+        lines.append(f"- **ID:** `{doc_id}`")
+        if description:
+            lines.append(f"- **Description:** {description}")
         lines.append("")
     return "\n".join(lines)
 

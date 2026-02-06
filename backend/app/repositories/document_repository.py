@@ -11,7 +11,7 @@ import sqlalchemy.exc
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from ..models import Document
-from ..schemas.document import DocumentCreate, DocumentUpdate, SearchResultResponse
+from ..schemas.document import DocumentCreate, DocumentUpdate, SearchResultResponse, SimilarDocumentResponse
 from ..database import is_postgresql
 from ..exceptions import DocumentNotFoundError
 from .base import BaseRepository
@@ -79,6 +79,7 @@ class DocumentRepository(BaseRepository[Document]):
             title=document.title,
             content=document.content,
             content_preview=content_preview,
+            description=getattr(document, 'description', None),
             generation_count=1
         )
         self.db.add(db_document)
@@ -147,6 +148,11 @@ class DocumentRepository(BaseRepository[Document]):
         db_document.generation_count += 1
         db_document.version = (db_document.version or 0) + 1
 
+        if document.description is not None:
+            db_document.description = document.description
+            # Clear embedding — content changed, needs re-embedding
+            db_document.embedding_model = None
+
         self.db.flush()
         self.db.refresh(db_document)
         return db_document
@@ -206,15 +212,12 @@ class DocumentRepository(BaseRepository[Document]):
     def purge_expired(self, days: int = 30) -> int:
         """Permanently delete documents that have been in trash longer than `days`."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        expired = (
+        count = (
             self.db.query(Document)
             .filter(Document.deleted_at.isnot(None))
             .filter(Document.deleted_at < cutoff)
-            .all()
+            .delete(synchronize_session="fetch")
         )
-        count = len(expired)
-        for doc in expired:
-            self.db.delete(doc)
         return count
 
     def search(self, query: str, limit: int = 20, allowed_prefixes: Optional[list[str]] = None) -> List[Document]:
@@ -277,7 +280,8 @@ class DocumentRepository(BaseRepository[Document]):
                             to_tsquery('english', :query)) as rank,
                     ts_headline('english', COALESCE(d.content, ''),
                                to_tsquery('english', :query),
-                               'StartSel=<mark>, StopSel=</mark>, MaxWords=40, MinWords=20') as snippet
+                               'StartSel=<mark>, StopSel=</mark>, MaxWords=40, MinWords=20') as snippet,
+                    d.description
                 FROM documents d
                 WHERE to_tsvector('english', COALESCE(d.title, '') || ' ' || COALESCE(d.content, ''))
                       @@ to_tsquery('english', :query)
@@ -340,7 +344,8 @@ class DocumentRepository(BaseRepository[Document]):
                     d.id, d.title, d.path, d.doc_type, d.keywords, d.repo_name,
                     d.content_preview, d.updated_at, d.generation_count,
                     bm25(documents_fts) as rank,
-                    snippet(documents_fts, 2, '<mark>', '</mark>', '...', 40) as snippet
+                    snippet(documents_fts, 2, '<mark>', '</mark>', '...', 40) as snippet,
+                    d.description
                 FROM documents_fts fts
                 JOIN documents d ON d.id = fts.doc_id
                 WHERE documents_fts MATCH :query
@@ -387,15 +392,15 @@ class DocumentRepository(BaseRepository[Document]):
 
         Both PostgreSQL and SQLite FTS queries SELECT the same column order:
         id, title, path, doc_type, keywords, repo_name, content_preview,
-        updated_at, generation_count, rank, snippet.
+        updated_at, generation_count, rank, snippet, description.
         """
         import json
 
         results: list[SearchResultResponse] = []
         for row in rows:
-            # Columns are positional from the SELECT clause — named for clarity
             doc_id, title, path, doc_type, raw_keywords, repo_name = row[0], row[1], row[2], row[3], row[4], row[5]
             content_preview, updated_at, generation_count, rank, snippet = row[6], row[7], row[8], row[9], row[10]
+            description = row[11] if len(row) > 11 else None
 
             # Keywords may come as JSON string (SQLite) or native list (PostgreSQL)
             doc_keywords = raw_keywords
@@ -416,6 +421,7 @@ class DocumentRepository(BaseRepository[Document]):
                 path=path,
                 doc_type=doc_type or "",
                 keywords=doc_keywords or [],
+                description=description,
                 repo_name=repo_name,
                 content_preview=content_preview,
                 updated_at=updated_at,
@@ -455,6 +461,93 @@ class DocumentRepository(BaseRepository[Document]):
             if grant_filter is not None:
                 query = query.filter(grant_filter)
         return query.order_by(Document.updated_at.desc()).limit(limit).all()
+
+    # -- Embedding methods --------------------------------------------------
+
+    def update_embedding(self, doc_id: str, embedding: list[float], model_name: str) -> None:
+        """Store embedding vector and model name for a document.
+
+        For PostgreSQL: writes to description_embedding (vector column) + embedding_model.
+        For SQLite: only writes embedding_model (no vector column).
+        """
+        if is_postgresql():
+            self.db.execute(
+                text("""
+                    UPDATE documents
+                    SET description_embedding = :embedding::vector,
+                        embedding_model = :model
+                    WHERE id = :doc_id
+                """),
+                {"embedding": str(embedding), "model": model_name, "doc_id": doc_id},
+            )
+        else:
+            # SQLite has no vector column — just track the model name
+            doc = self.get_by_id(doc_id)
+            doc.embedding_model = model_name
+        self.db.flush()
+
+    def search_by_vector(
+        self,
+        query_embedding: list[float],
+        limit: int = 5,
+        exclude_id: str | None = None,
+        allowed_prefixes: list[str] | None = None,
+    ) -> list[SimilarDocumentResponse]:
+        """Find documents by cosine similarity. PostgreSQL only (pgvector)."""
+        if not is_postgresql():
+            return []
+
+        try:
+            sql = """
+                SELECT d.id, d.title, d.path, d.description,
+                       1 - (d.description_embedding <=> :embedding::vector) as similarity
+                FROM documents d
+                WHERE d.description_embedding IS NOT NULL
+                AND d.deleted_at IS NULL
+            """
+            params: dict = {"embedding": str(query_embedding), "limit": limit}
+
+            if exclude_id:
+                sql += " AND d.id != :exclude_id"
+                params["exclude_id"] = exclude_id
+
+            if allowed_prefixes is not None and "" not in allowed_prefixes:
+                if not allowed_prefixes:
+                    return []
+                grant_clauses = []
+                for i, prefix in enumerate(allowed_prefixes):
+                    grant_clauses.append(f"(d.path = :gp_exact_{i} OR d.path LIKE :gp_like_{i})")
+                    params[f"gp_exact_{i}"] = prefix
+                    params[f"gp_like_{i}"] = f"{prefix}/%"
+                sql += f" AND ({' OR '.join(grant_clauses)})"
+
+            sql += " ORDER BY d.description_embedding <=> :embedding::vector LIMIT :limit"
+
+            rows = self.db.execute(text(sql), params).fetchall()
+            return [
+                SimilarDocumentResponse(
+                    id=row[0],
+                    title=row[1],
+                    path=row[2],
+                    description=row[3],
+                    similarity_score=round(float(row[4]), 4) if row[4] else 0.0,
+                )
+                for row in rows
+            ]
+        except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError):
+            return []
+
+    def get_unembedded_documents(self, model_name: str) -> list[Document]:
+        """Get documents that need (re-)embedding — missing or wrong model."""
+        return (
+            self._base_query()
+            .filter(
+                Document.description.isnot(None),
+                Document.description != "",
+                (Document.embedding_model != model_name) | (Document.embedding_model.is_(None)),
+            )
+            .all()
+        )
 
     def move_folder(self, source_path: str, target_path: str) -> int:
         """Move folder by updating path prefixes (active docs only)."""

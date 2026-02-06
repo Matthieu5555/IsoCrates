@@ -11,43 +11,47 @@ from typing import List, Optional
 from ..core.auth import AuthContext, require_auth, require_admin, optional_auth
 from ..database import get_db
 from datetime import datetime
-from ..schemas.document import DocumentCreate, DocumentResponse, DocumentListResponse, DocumentUpdate, DocumentMoveRequest, DocumentKeywordsUpdate, DocumentRepoUpdate, SearchResultResponse, BatchOperation, BatchResult, GenerateIdRequest, GenerateIdResponse
+from fastapi import BackgroundTasks
+from ..schemas.document import DocumentCreate, DocumentResponse, DocumentListResponse, DocumentUpdate, DocumentMoveRequest, DocumentKeywordsUpdate, DocumentRepoUpdate, SearchResultResponse, SimilarDocumentResponse, BatchOperation, BatchResult, BatchParams, GenerateIdRequest, GenerateIdResponse
 from ..services import DocumentService
 from ..services.dependency_service import DependencyService
+from ..services.embedding_service import EmbeddingService
+from ..database import SessionLocal
 from ..services.permission_service import check_permission, filter_paths_by_grants
+from ..core.config import settings
 from ..exceptions import DocumentNotFoundError, ForbiddenError
 
 router = APIRouter(prefix="/api/docs", tags=["documents"])
 
 
-def _prefixes_from_auth(auth: Optional[AuthContext]) -> Optional[list[str]]:
-    """Extract allowed path prefixes from auth context for SQL-level filtering.
+def _embed_in_background(doc_id: str):
+    """Background task: generate and store embedding for a document."""
+    db = SessionLocal()
+    try:
+        service = EmbeddingService(db)
+        service.embed_document(doc_id)
+    finally:
+        db.close()
 
-    Returns None when no filtering is needed (no auth / auth disabled).
-    """
-    if auth is None:
-        return None
+
+def _prefixes_from_auth(auth: AuthContext) -> list[str]:
+    """Extract allowed path prefixes from auth context for SQL-level filtering."""
     return filter_paths_by_grants(auth.grants)
 
 
-def _check_doc_access(service: DocumentService, auth: Optional[AuthContext], doc_id: str, action: str):
+def _check_doc_access(service: DocumentService, auth: AuthContext, doc_id: str, action: str):
     """Load a document and verify the user has permission. Returns the document.
 
-    Returns 404 (not 403) when access is denied — the document is invisible,
-    not forbidden. This prevents information leakage about document existence.
+    Delegates to DocumentService.get_document_authorized() which hides
+    permission logic in the service layer.
     """
-    doc = service.get_document(doc_id)
-    if doc is None:
-        raise DocumentNotFoundError(doc_id)
-    if auth is not None and not check_permission(auth.grants, doc.path, action):
-        # Return 404 to avoid leaking that the document exists
-        raise DocumentNotFoundError(doc_id)
-    return doc
+    return service.get_document_authorized(doc_id, auth.grants, action)
 
 
 @router.post("", response_model=DocumentResponse, status_code=201)
 def create_document(
     document: DocumentCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(require_auth),
 ):
@@ -57,6 +61,10 @@ def create_document(
 
     service = DocumentService(db)
     doc, _is_new = service.create_or_update_document(document)
+
+    if doc.description and EmbeddingService.is_configured():
+        background_tasks.add_task(_embed_in_background, doc.id)
+
     return doc
 
 
@@ -67,7 +75,7 @@ def list_documents(
     path_prefix: Optional[str] = None,
     repo_url: Optional[str] = None,
     db: Session = Depends(get_db),
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """List documents filtered by the user's folder grants."""
     service = DocumentService(db)
@@ -101,7 +109,7 @@ def search_documents(
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """Full-text search with optional filters, scoped to user's grants."""
     service = DocumentService(db)
@@ -116,7 +124,7 @@ def search_documents(
 def recent_documents(
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """Get the most recently updated documents, scoped to user's grants."""
     service = DocumentService(db)
@@ -128,11 +136,13 @@ def recent_documents(
             repo_name=doc.repo_name,
             doc_type=doc.doc_type,
             keywords=doc.keywords or [],
+            description=doc.description,
             path=doc.path,
             title=doc.title,
             content_preview=doc.content_preview,
             updated_at=doc.updated_at,
             generation_count=doc.generation_count,
+            is_indexed=doc.is_indexed,
         )
         for doc in docs
     ]
@@ -176,11 +186,42 @@ def generate_id(
     return GenerateIdResponse(doc_id=doc_id)
 
 
+@router.get("/similar/", response_model=List[SimilarDocumentResponse])
+def find_similar_by_text(
+    text: str = Query(..., min_length=1),
+    limit: int = Query(5, ge=1, le=20),
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(optional_auth),
+):
+    """Find documents similar to the given text (semantic search).
+
+    Useful for suggesting existing docs when creating a new note.
+    Requires embeddings to be configured (EMBEDDING_MODEL).
+    """
+    service = EmbeddingService(db)
+    return service.find_similar(
+        text=text,
+        limit=limit,
+        allowed_prefixes=_prefixes_from_auth(auth),
+    )
+
+
+@router.post("/reindex", status_code=200)
+def reindex_embeddings(
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_admin),
+):
+    """Re-embed all documents with the current embedding model. Admin only."""
+    service = EmbeddingService(db)
+    count = service.reindex_all()
+    return {"reindexed": count, "model": settings.embedding_model}
+
+
 @router.post("/batch-titles", response_model=dict)
 def batch_titles(
     doc_ids: List[str] = Body(..., embed=True),
     db: Session = Depends(get_db),
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """Resolve a list of document IDs to their titles. Returns {id: title} map.
 
@@ -192,7 +233,7 @@ def batch_titles(
     for doc_id in doc_ids[:100]:
         doc = service.get_document(doc_id)
         if doc is not None:
-            if auth is None or check_permission(auth.grants, doc.path, "read"):
+            if check_permission(auth.grants, doc.path, "read"):
                 result[doc_id] = doc.title
     return result
 
@@ -201,7 +242,7 @@ def batch_titles(
 def resolve_wikilink(
     target: str = Query(..., min_length=1),
     db: Session = Depends(get_db),
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """Resolve a wikilink target to a document ID (respects permission grants)."""
     dep_service = DependencyService(db)
@@ -209,12 +250,11 @@ def resolve_wikilink(
     if not doc_id:
         raise HTTPException(status_code=404, detail=f"Could not resolve wikilink: {target}")
 
-    # When auth is active, verify caller can see the resolved document
-    if auth is not None:
-        service = DocumentService(db)
-        doc = service.get_document(doc_id)
-        if doc is None or not check_permission(auth.grants, doc.path, "read"):
-            raise HTTPException(status_code=404, detail=f"Could not resolve wikilink: {target}")
+    # Verify caller can see the resolved document
+    service = DocumentService(db)
+    doc = service.get_document(doc_id)
+    if doc is None or not check_permission(auth.grants, doc.path, "read"):
+        raise HTTPException(status_code=404, detail=f"Could not resolve wikilink: {target}")
 
     return {"target": target, "doc_id": doc_id}
 
@@ -226,7 +266,7 @@ def resolve_wikilink(
 def get_document(
     doc_id: str,
     db: Session = Depends(get_db),
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """Get specific document by ID. Returns 404 if not found or no access."""
     service = DocumentService(db)
@@ -237,6 +277,7 @@ def get_document(
 @router.put("/{doc_id}", response_model=DocumentResponse)
 def update_document(
     doc_id: str,
+    background_tasks: BackgroundTasks,
     update_data: DocumentUpdate = Body(...),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(require_auth),
@@ -244,7 +285,12 @@ def update_document(
     """Update document content (creates new version)."""
     service = DocumentService(db)
     _check_doc_access(service, auth, doc_id, "edit")
-    return service.update_document(doc_id, update_data)
+    doc = service.update_document(doc_id, update_data)
+
+    if doc.description and EmbeddingService.is_configured():
+        background_tasks.add_task(_embed_in_background, doc.id)
+
+    return doc
 
 
 @router.put("/{doc_id}/move", response_model=DocumentResponse)
@@ -323,7 +369,7 @@ def restore_document(
     doc = doc_repo.get_by_id_including_deleted(doc_id)
     if doc is None:
         raise DocumentNotFoundError(doc_id)
-    if not check_permission(auth.grants, doc.path or "", "edit"):
+    if not check_permission(auth.grants, doc.path or "", "delete"):
         raise DocumentNotFoundError(doc_id)  # 404 to avoid leaking existence
     service = DocumentService(db)
     return service.restore_document(doc_id)
@@ -341,11 +387,30 @@ def permanent_delete_document(
     return None
 
 
+@router.get("/{doc_id}/similar", response_model=List[SimilarDocumentResponse])
+def find_similar_to_doc(
+    doc_id: str,
+    limit: int = Query(5, ge=1, le=20),
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(optional_auth),
+):
+    """Find documents similar to the given document (by description embedding)."""
+    doc_service = DocumentService(db)
+    _check_doc_access(doc_service, auth, doc_id, "read")
+
+    emb_service = EmbeddingService(db)
+    return emb_service.find_similar_to_doc(
+        doc_id=doc_id,
+        limit=limit,
+        allowed_prefixes=_prefixes_from_auth(auth),
+    )
+
+
 @router.get("/{doc_id}/broken-links", response_model=list)
 def get_broken_links(
     doc_id: str,
     db: Session = Depends(get_db),
-    auth: Optional[AuthContext] = Depends(optional_auth),
+    auth: AuthContext = Depends(optional_auth),
 ):
     """Check all wikilinks in a document and report which ones are broken."""
     doc_service = DocumentService(db)

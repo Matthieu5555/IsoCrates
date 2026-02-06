@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Save, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
@@ -69,9 +69,13 @@ export function DocumentView({ document: initialDocument }: DocumentViewProps) {
     return () => window.removeEventListener('beforeunload', handler);
   }, [isEditing, content, document.content]);
 
-  const handleEdit = () => {
+  const handleEdit = useCallback(() => {
     setIsEditing(true);
-  };
+  }, []);
+
+  const handleDocumentUpdate = useCallback((updatedDoc: Document) => {
+    setDocument(updatedDoc);
+  }, []);
 
   const handleCancel = () => {
     if (content !== document.content) {
@@ -196,8 +200,13 @@ export function DocumentView({ document: initialDocument }: DocumentViewProps) {
 
       {!isEditing && (
         <>
+          {document.description && (
+            <p className="text-sm text-muted-foreground italic mb-6 border-l-2 border-border pl-3">
+              {document.description}
+            </p>
+          )}
           <MarkdownRenderer content={document.content} />
-          <MetadataDetails document={document} onDocumentUpdate={(updatedDoc) => setDocument(updatedDoc)} />
+          <MetadataDetails document={document} onDocumentUpdate={handleDocumentUpdate} />
           <VersionHistory docId={document.id} />
         </>
       )}

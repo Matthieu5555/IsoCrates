@@ -206,6 +206,14 @@ Every page should link to 5-15 other pages. The wikilink graph should be
 DENSE — a reader should be able to navigate the entire wiki by clicking
 through links. Think of it as a dependency/relationship map.
 
+DESCRIPTION FIELD:
+Every document MUST have a "description" — a 2-3 sentence summary of what the
+document covers and who it's for. This is stored in the database and used by:
+  - MCP tools (LLMs read descriptions to decide which document to fetch)
+  - Semantic search (descriptions are embedded for vector similarity)
+  - Document discovery (shown in search results and document lists)
+Write descriptions as if explaining to a colleague what they'll find in this page.
+
 FORMAT CHOICES:
 For each section, specify what format best serves comprehension:
   "table:..." — structured data, comparisons, specifications
@@ -225,6 +233,7 @@ Output ONLY a valid JSON object (no markdown fences, no commentary).
       "doc_type": "overview",
       "title": "Overview",
       "path": "{crate_path}",
+      "description": "High-level overview of the project, its purpose, and how its components fit together. Start here to orient yourself.",
       "rationale": "Index page — orients the reader and links to everything",
       "sections": [
         {{
@@ -245,6 +254,7 @@ Output ONLY a valid JSON object (no markdown fences, no commentary).
       "doc_type": "component",
       "title": "Document Service",
       "path": "{crate_path}/architecture",
+      "description": "Explains the Document Service: CRUD operations, version tracking, and wikilink dependency management. Covers the public interface and internal design.",
       "rationale": "Focused page on one core service — keeps pages short",
       "sections": [
         {{
@@ -265,6 +275,7 @@ Output ONLY a valid JSON object (no markdown fences, no commentary).
       "doc_type": "guide",
       "title": "Deployment Guide",
       "path": "{crate_path}",
+      "description": "Step-by-step instructions for deploying the application in production, including Docker setup, environment configuration, and reverse proxy.",
       "replaces_title": "Deploy Instructions",
       "rationale": "Renaming existing doc — replaces_title ensures update instead of duplicate",
       "sections": [],
@@ -354,27 +365,32 @@ CRITICAL RULES:
 
         core_pages = [
             {"doc_type": "overview", "title": "Overview", "path": crate_path,
+             "description": "High-level overview of the project, its purpose, and how its components fit together. Start here to orient yourself.",
              "sections": [
                  {"heading": "What is this project?", "rich_content": ["diagram:system overview"]},
                  {"heading": "Key Components", "rich_content": ["table:components"]},
              ], "key_files_to_read": ["README.md"]},
             {"doc_type": "capabilities", "title": "Capabilities & User Stories", "path": crate_path,
+             "description": "Business-facing document describing what users can do with this tool, including user stories, feature matrix, and key workflows.",
              "sections": [
                  {"heading": "User Stories", "rich_content": []},
                  {"heading": "Feature Matrix", "rich_content": ["table:capabilities"]},
                  {"heading": "Key Workflows", "rich_content": ["diagram:user workflows"]},
              ], "key_files_to_read": ["README.md"]},
             {"doc_type": "quickstart", "title": "Getting Started", "path": f"{crate_path}/getting-started",
+             "description": "Step-by-step guide to install prerequisites, set up the project, and get it running locally in under 5 minutes.",
              "sections": [
                  {"heading": "Prerequisites", "rich_content": ["table:requirements"]},
                  {"heading": "Installation", "rich_content": ["code:install"]},
              ], "key_files_to_read": ["README.md"]},
             {"doc_type": "architecture", "title": "Architecture", "path": f"{crate_path}/architecture",
+             "description": "System architecture and design decisions, including component interactions, data flow, and technology choices.",
              "sections": [
                  {"heading": "System Design", "rich_content": ["diagram:architecture"]},
                  {"heading": "Components", "rich_content": ["table:components"]},
              ], "key_files_to_read": ["README.md"]},
             {"doc_type": "api", "title": "API Reference", "path": f"{crate_path}/api",
+             "description": "Complete API endpoint reference with request/response formats, authentication requirements, and usage examples.",
              "sections": [
                  {"heading": "Endpoints", "rich_content": ["table:endpoints"]},
              ], "key_files_to_read": ["README.md"]},
@@ -383,10 +399,12 @@ CRITICAL RULES:
         if complexity in ("medium", "large"):
             core_pages.extend([
                 {"doc_type": "config", "title": "Configuration", "path": f"{crate_path}/config",
+                 "description": "All configuration options including environment variables, feature flags, and provider settings.",
                  "sections": [
                      {"heading": "Environment Variables", "rich_content": ["table:env vars"]},
                  ], "key_files_to_read": ["README.md"]},
                 {"doc_type": "guide", "title": "User Guide", "path": f"{crate_path}/guide",
+                 "description": "Hands-on guide walking through core workflows and common tasks from a user's perspective.",
                  "sections": [
                      {"heading": "Core Workflow", "rich_content": ["diagram:workflow"]},
                  ], "key_files_to_read": ["README.md"]},
@@ -395,10 +413,12 @@ CRITICAL RULES:
         if complexity == "large":
             core_pages.extend([
                 {"doc_type": "data-model", "title": "Data Model", "path": f"{crate_path}/architecture/data-model",
+                 "description": "Database schema, entity relationships, and data flow between tables. Covers both SQLite and PostgreSQL variants.",
                  "sections": [
                      {"heading": "Schema", "rich_content": ["diagram:ER diagram"]},
                  ], "key_files_to_read": ["README.md"]},
                 {"doc_type": "contributing", "title": "Contributing", "path": f"{crate_path}/contributing",
+                 "description": "Developer onboarding: how to set up a local development environment, run tests, and submit contributions.",
                  "sections": [
                      {"heading": "Development Setup", "rich_content": ["code:setup"]},
                  ], "key_files_to_read": ["README.md"]},

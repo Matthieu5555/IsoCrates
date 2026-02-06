@@ -78,13 +78,27 @@ class FolderService:
     def get_folder_by_path(self, path: str) -> Optional[FolderMetadata]:
         return self.folder_repo.get_by_path(path)
 
-    def list_folders(self, path_prefix: Optional[str] = None) -> List[FolderMetadata]:
+    def list_folders(self, path_prefix: Optional[str] = None, allowed_prefixes: Optional[List[str]] = None) -> List[FolderMetadata]:
+        from sqlalchemy import or_
+
+        query = self.db.query(FolderMetadata)
         if path_prefix:
-            return self.db.query(FolderMetadata).filter(
+            query = query.filter(
                 (FolderMetadata.path == path_prefix)
                 | (FolderMetadata.path.like(f"{path_prefix}/%"))
-            ).order_by(FolderMetadata.sort_order, FolderMetadata.path).all()
-        return self.folder_repo.get_all()
+            )
+        if allowed_prefixes is not None:
+            prefix_filters = []
+            for prefix in allowed_prefixes:
+                if prefix == "":
+                    prefix_filters = []
+                    break
+                prefix_filters.append(FolderMetadata.path.like(f"{prefix}%"))
+            if prefix_filters:
+                query = query.filter(or_(*prefix_filters))
+            elif not any(p == "" for p in allowed_prefixes):
+                return []
+        return query.order_by(FolderMetadata.sort_order, FolderMetadata.path).all()
 
     def update_folder(
         self, folder_id: str, data: FolderMetadataUpdate

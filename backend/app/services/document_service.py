@@ -7,14 +7,15 @@ is hidden behind the interface.
 """
 
 from sqlalchemy.orm import Session
+import sqlalchemy.exc
 from typing import List, Optional
 import hashlib
 import logging
 from ..models import Document
-from ..schemas.document import DocumentCreate, DocumentUpdate, DocumentListResponse, DocumentKeywordsUpdate, SearchResultResponse, BatchResult, BatchError
+from ..schemas.document import DocumentCreate, DocumentUpdate, DocumentListResponse, DocumentKeywordsUpdate, SearchResultResponse, BatchResult, BatchError, BatchParams
 from ..repositories import DocumentRepository, VersionRepository
 from ..schemas.version import VersionCreate
-from ..exceptions import DocumentNotFoundError, ConflictError, ValidationError
+from ..exceptions import IsoException, DocumentNotFoundError, ConflictError, ValidationError
 from ..services.dependency_service import DependencyService
 
 # Number of hex chars used from SHA-256 hash for document ID components.
@@ -93,6 +94,7 @@ class DocumentService:
             # version creation, and dependency refresh in one path.
             update_data = DocumentUpdate(
                 content=document.content,
+                description=document.description,
                 author_type=document.author_type,
                 author_metadata=document.author_metadata,
                 version=existing.version,
@@ -149,6 +151,24 @@ class DocumentService:
         """Get document by ID. Returns None if not found (caller decides on 404)."""
         return self.doc_repo.get_by_id_optional(doc_id)
 
+    def get_document_authorized(self, doc_id: str, grants: list, action: str) -> Document:
+        """Load a document and verify permission in one call.
+
+        Returns 404 (not 403) when access is denied — the document appears
+        invisible rather than forbidden, preventing information leakage.
+
+        Raises:
+            DocumentNotFoundError: if not found or access denied.
+        """
+        from ..services.permission_service import check_permission
+
+        doc = self.doc_repo.get_by_id_optional(doc_id)
+        if doc is None:
+            raise DocumentNotFoundError(doc_id)
+        if not check_permission(grants, doc.path, action):
+            raise DocumentNotFoundError(doc_id)
+        return doc
+
     def list_documents(self, skip: int = 0, limit: int = 100, path_prefix: Optional[str] = None, repo_url: Optional[str] = None, allowed_prefixes: Optional[list[str]] = None) -> List[DocumentListResponse]:
         """List all documents."""
         documents = self.doc_repo.get_all(skip, limit, path_prefix, repo_url=repo_url, allowed_prefixes=allowed_prefixes)
@@ -158,12 +178,14 @@ class DocumentService:
                 repo_name=doc.repo_name,
                 doc_type=doc.doc_type,
                 keywords=doc.keywords or [],
+                description=doc.description,
                 path=doc.path,
                 title=doc.title,
                 content_preview=doc.content_preview,
                 updated_at=doc.updated_at,
                 generation_count=doc.generation_count,
                 version=doc.version,
+                is_indexed=bool(doc.embedding_model),
             )
             for doc in documents
         ]
@@ -199,13 +221,15 @@ class DocumentService:
                 repo_name=doc.repo_name,
                 doc_type=doc.doc_type,
                 keywords=doc.keywords or [],
+                description=doc.description,
                 path=doc.path,
                 title=doc.title,
                 content_preview=doc.content_preview,
                 updated_at=doc.updated_at,
                 generation_count=doc.generation_count,
                 version=doc.version,
-                deleted_at=doc.deleted_at
+                deleted_at=doc.deleted_at,
+                is_indexed=bool(doc.embedding_model),
             )
             for doc in documents
         ]
@@ -287,7 +311,7 @@ class DocumentService:
         self,
         operation: str,
         doc_ids: list[str],
-        params: dict,
+        params: BatchParams,
         grants: list,
         is_service_account: bool = False,
     ) -> BatchResult:
@@ -335,7 +359,7 @@ class DocumentService:
 
         return result
 
-    def execute_batch(self, operation: str, doc_ids: list[str], params: dict) -> BatchResult:
+    def execute_batch(self, operation: str, doc_ids: list[str], params: BatchParams) -> BatchResult:
         """Execute a batch operation on multiple documents.
 
         Returns a BatchResult with total, succeeded, failed, errors.
@@ -353,24 +377,22 @@ class DocumentService:
                     self.doc_repo.soft_delete(doc_id)
                     succeeded += 1
                 elif operation == "move":
-                    target_path = params.get("target_path", "")
-                    self._move_document_impl(doc_id, target_path)
+                    self._move_document_impl(doc_id, params.target_path)
                     succeeded += 1
                 elif operation == "add_keywords":
-                    kw_to_add = params.get("keywords", [])
                     doc = self.doc_repo.get_by_id(doc_id)
                     existing = doc.keywords or []
-                    doc.keywords = list(set(existing + kw_to_add))
+                    doc.keywords = list(set(existing + params.keywords))
                     succeeded += 1
                 elif operation == "remove_keywords":
-                    kw_to_remove = set(params.get("keywords", []))
+                    kw_to_remove = set(params.keywords)
                     doc = self.doc_repo.get_by_id(doc_id)
                     doc.keywords = [k for k in (doc.keywords or []) if k not in kw_to_remove]
                     succeeded += 1
                 else:
                     errors.append(BatchError(doc_id=doc_id, error=f"Unknown operation: {operation}"))
                 savepoint.commit()
-            except Exception as e:
+            except (IsoException, ValueError, sqlalchemy.exc.IntegrityError) as e:
                 savepoint.rollback()
                 logger.warning("Batch %s failed for %s: %s", operation, doc_id, e, exc_info=True)
                 errors.append(BatchError(doc_id=doc_id, error=str(e)))

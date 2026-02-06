@@ -14,6 +14,7 @@ from .formatters import (
     format_document_list,
     format_related,
     format_search_results,
+    format_similar_results,
 )
 
 mcp = FastMCP("IsoCrates Documentation")
@@ -138,6 +139,41 @@ async def get_related(title_or_id: str) -> str:
         return format_related(doc_title, deps, title_cache)
     except Exception as e:
         return f"Error getting related documents: {e}"
+
+
+@mcp.tool()
+async def find_similar_docs(
+    title_or_id: str,
+    limit: int = 5,
+) -> str:
+    """Find documents semantically similar to a given document.
+
+    Uses vector embeddings to find documents with related content,
+    even if they don't share exact keywords. Requires embeddings
+    to be configured on the server.
+
+    Args:
+        title_or_id: Document title or ID to find similar docs for
+        limit: Max results (default 5)
+    """
+    try:
+        # Resolve title to ID
+        doc_id = await client.resolve_wikilink(title_or_id)
+        if not doc_id:
+            # Try as direct ID
+            try:
+                await client.get_document(title_or_id)
+                doc_id = title_or_id
+            except Exception:
+                return (
+                    f"Document not found: '{title_or_id}'. "
+                    "Use search_docs to find the correct title."
+                )
+
+        results = await client.find_similar(doc_id, limit)
+        return format_similar_results(results)
+    except Exception as e:
+        return f"Error finding similar documents: {e}"
 
 
 def main() -> None:

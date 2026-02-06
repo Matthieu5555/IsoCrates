@@ -2,7 +2,8 @@
 
 Public interface:
     ``require_auth``  — returns AuthContext or raises 401.
-    ``optional_auth`` — returns AuthContext or None, never raises.
+    ``optional_auth`` — always returns AuthContext, never raises. Returns a
+                        context with empty grants when no valid token is present.
     ``require_admin`` — returns AuthContext, raises 403 if not admin.
 
 When ``settings.auth_enabled`` is False all dependencies return an anonymous
@@ -65,6 +66,14 @@ _ANONYMOUS = AuthContext(
     grants=[_StubGrant(path_prefix="", role="admin")],
 )
 
+# Auth-enabled but no token: deny everything.
+# Empty grants means every permission check returns False.
+_UNAUTHENTICATED = AuthContext(
+    user_id="anonymous",
+    role="viewer",
+    grants=[],
+)
+
 
 def get_bearer_scheme() -> HTTPBearer:
     """Expose the security scheme so OpenAPI picks it up."""
@@ -97,19 +106,24 @@ def require_auth(
 def optional_auth(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
     db: Session = Depends(get_db),
-) -> Optional[AuthContext]:
-    """Validate a token if present, return None otherwise. Never raises."""
+) -> AuthContext:
+    """Validate a token if present. Returns an AuthContext with empty grants
+    when auth is enabled but no valid token is provided — ensuring permission
+    checks always run and deny by default.
+
+    Never raises (unlike require_auth).
+    """
     if not settings.auth_enabled:
         return _ANONYMOUS
 
     if credentials is None:
-        return None
+        return _UNAUTHENTICATED
 
     payload = decode_token(
         credentials.credentials, settings.jwt_secret_key, settings.jwt_algorithm
     )
     if payload is None:
-        return None
+        return _UNAUTHENTICATED
 
     return _load_auth_context(payload, db)
 
