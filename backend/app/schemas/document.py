@@ -61,6 +61,7 @@ class DocumentUpdate(BaseModel):
     content: str
     author_type: str = "ai"
     author_metadata: Optional[dict] = None
+    version: Optional[int] = None  # Required for conflict detection; omit to skip check
 
 
 class DocumentMoveRequest(BaseModel):
@@ -120,12 +121,31 @@ class BatchOperation(BaseModel):
     params: dict = {}
 
 
+class BatchError(BaseModel):
+    """A single failure within a batch operation."""
+    doc_id: str
+    error: str
+
+
 class BatchResult(BaseModel):
     """Result of a batch operation."""
     total: int
     succeeded: int
     failed: int
-    errors: List[dict] = []
+    errors: List[BatchError] = []
+
+
+class GenerateIdRequest(BaseModel):
+    """Request to generate a stable document ID."""
+    repo_url: Optional[str] = None
+    path: str = ""
+    title: str = ""
+    doc_type: str = ""
+
+
+class GenerateIdResponse(BaseModel):
+    """Response containing the generated document ID."""
+    doc_id: str
 
 
 class DocumentResponse(DocumentBase):
@@ -135,6 +155,7 @@ class DocumentResponse(DocumentBase):
     created_at: datetime
     updated_at: datetime
     generation_count: int
+    version: int = 1
     deleted_at: Optional[datetime] = None
 
     class Config:
@@ -152,6 +173,7 @@ class DocumentListResponse(BaseModel):
     content_preview: Optional[str] = None
     updated_at: datetime
     generation_count: int
+    version: int = 1
     deleted_at: Optional[datetime] = None
 
     class Config:

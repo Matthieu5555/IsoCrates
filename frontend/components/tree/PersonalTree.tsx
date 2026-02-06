@@ -4,21 +4,46 @@ import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { Plus, FileText, Folder, FolderOpen, RefreshCw, Trash2, Link2 } from 'lucide-react';
-import { getPersonalTree, createPersonalFolder, deletePersonalFolder, removeDocumentRef } from '@/lib/api/personal';
+import { createPersonalFolder, deletePersonalFolder, removeDocumentRef } from '@/lib/api/personal';
 import type { PersonalTreeNode } from '@/types';
 import { NewFolderDialog } from './dialogs/NewFolderDialog';
 import { AddDocumentDialog } from './dialogs/AddDocumentDialog';
 import { ConfirmDialog } from './dialogs/ConfirmDialog';
-import { buttonVariants, iconVariants, contextMenuVariants, menuItemVariants } from '@/lib/styles/button-variants';
+import { buttonVariants, iconVariants, contextMenuVariants, menuItemVariants, overlayVariants } from '@/lib/styles/button-variants';
 import { toast } from '@/lib/notifications/toast';
 import { getApiErrorMessage } from '@/lib/api/client';
+import { usePersonalTreeData } from '@/hooks/usePersonalTreeData';
+import { usePersonalTreeDragDrop } from '@/hooks/usePersonalTreeDragDrop';
+import { INDENT_PER_LEVEL, NODE_BASE_PADDING } from '@/lib/config/tree-constants';
 
 export function PersonalTree() {
   const router = useRouter();
-  const [tree, setTree] = useState<PersonalTreeNode[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+
+  // --- Extracted hooks ---
+  const {
+    tree,
+    loading,
+    error,
+    expandedNodes,
+    loadTree,
+    toggleNode,
+    setExpandedNodes,
+  } = usePersonalTreeData();
+
+  const {
+    draggedNode,
+    dropTargetId,
+    rootDropActive,
+    moving,
+    handleDragStart,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop,
+    handleDragEnd,
+    handleRootDragOver,
+    handleRootDragLeave,
+    handleRootDrop,
+  } = usePersonalTreeDragDrop({ onTreeChanged: loadTree, setExpandedNodes });
 
   // Dialogs
   const [newFolderDialogOpen, setNewFolderDialogOpen] = useState(false);
@@ -33,35 +58,6 @@ export function PersonalTree() {
   // Selected node for operations
   const [selectedNode, setSelectedNode] = useState<PersonalTreeNode | null>(null);
   const [selectedParentId, setSelectedParentId] = useState<string | null>(null);
-
-  useEffect(() => {
-    loadTree();
-  }, []);
-
-  async function loadTree() {
-    try {
-      setLoading(true);
-      const data = await getPersonalTree();
-      setTree(data);
-      const firstLevel = new Set(data.map(node => node.id));
-      setExpandedNodes(firstLevel);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load personal tree';
-      setError(message);
-      toast.error('Failed to load personal tree', message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function toggleNode(nodeId: string) {
-    setExpandedNodes(prev => {
-      const next = new Set(prev);
-      if (next.has(nodeId)) next.delete(nodeId);
-      else next.add(nodeId);
-      return next;
-    });
-  }
 
   function handleNodeClick(node: PersonalTreeNode) {
     if (node.type === 'document' && node.document_id) {
@@ -83,12 +79,10 @@ export function PersonalTree() {
 
   function handleAddDocClick(folderId?: string | null) {
     if (!folderId) {
-      // Need at least one folder to add docs to
       if (tree.length === 0) {
         toast.warning('No folders', 'Create a folder first to add documents');
         return;
       }
-      // Use first folder as default
       folderId = tree[0].id;
     }
     setSelectedParentId(folderId);
@@ -97,7 +91,6 @@ export function PersonalTree() {
 
   async function handleCreateFolder(folderData: { path: string; description?: string }) {
     try {
-      // In personal tree, "path" is just the folder name
       const name = folderData.path.split('/').pop() || folderData.path;
       await createPersonalFolder({
         name,
@@ -128,18 +121,23 @@ export function PersonalTree() {
   async function handleDeleteConfirm() {
     if (!selectedNode) return;
     try {
-      if (selectedNode.type === 'folder' && selectedNode.folder_id) {
-        await deletePersonalFolder(selectedNode.folder_id);
+      if (selectedNode.type === 'folder') {
+        const folderId = selectedNode.folder_id || selectedNode.id;
+        await deletePersonalFolder(folderId);
         toast.success('Folder deleted');
-      } else if (selectedNode.ref_id) {
+      } else if (selectedNode.type === 'document' && selectedNode.ref_id) {
         await removeDocumentRef(selectedNode.ref_id);
         toast.success('Reference removed');
+      } else {
+        toast.error('Delete failed', 'Unable to determine item type');
+        return;
       }
       await loadTree();
-      setDeleteConfirmOpen(false);
-      setSelectedNode(null);
     } catch (err) {
       toast.error('Delete failed', getApiErrorMessage(err));
+      throw err;
+    } finally {
+      setSelectedNode(null);
     }
   }
 
@@ -161,16 +159,31 @@ export function PersonalTree() {
   function renderNode(node: PersonalTreeNode, level = 0) {
     const isExpanded = expandedNodes.has(node.id);
     const hasChildren = node.children && node.children.length > 0;
-    const indent = level * 16;
+    const indent = level * INDENT_PER_LEVEL;
+    const isDropTarget = dropTargetId === node.id;
+
+    const folderDropProps = node.type === 'folder' ? {
+      onDragOver: (e: React.DragEvent) => handleDragOver(e, node),
+      onDragLeave: handleDragLeave,
+      onDrop: (e: React.DragEvent) => handleDrop(e, node),
+    } : {};
 
     return (
-      <div key={node.id}>
+      <div key={node.id} {...folderDropProps}>
         <div>
           <button
             onClick={() => handleNodeClick(node)}
             onContextMenu={(e) => handleContextMenu(e, node)}
-            className="w-full text-left px-3 py-2 hover:bg-muted rounded text-sm flex items-center gap-2 transition-colors"
-            style={{ paddingLeft: `${indent + 12}px` }}
+            draggable={true}
+            onDragStart={(e) => handleDragStart(e, node)}
+            onDragOver={(e) => handleDragOver(e, node)}
+            onDragLeave={handleDragLeave}
+            onDrop={(e) => handleDrop(e, node)}
+            onDragEnd={handleDragEnd}
+            className={`w-full text-left px-3 py-2 hover:bg-muted rounded text-sm flex items-center gap-2 transition-colors cursor-grab active:cursor-grabbing ${
+              isDropTarget ? overlayVariants.dropTarget : ''
+            }`}
+            style={{ paddingLeft: `${indent + NODE_BASE_PADDING}px` }}
           >
             {hasChildren && (
               <span className="text-xs w-3">
@@ -226,6 +239,14 @@ export function PersonalTree() {
 
   return (
     <div className="h-full flex flex-col relative">
+      {moving && (
+        <div className={overlayVariants.loading}>
+          <div className="bg-background border border-border p-4 rounded-lg shadow-lg">
+            Moving...
+          </div>
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="p-3 border-b border-border flex items-center gap-2">
         <button
@@ -254,8 +275,15 @@ export function PersonalTree() {
         </button>
       </div>
 
-      {/* Tree */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-1">
+      {/* Tree with root drop zone */}
+      <div
+        className={`flex-1 overflow-y-auto p-4 space-y-1 ${
+          rootDropActive ? 'ring-2 ring-primary/50 ring-inset bg-primary/5' : ''
+        }`}
+        onDragOver={handleRootDragOver}
+        onDragLeave={handleRootDragLeave}
+        onDrop={handleRootDrop}
+      >
         {tree.length === 0 && (
           <div className="text-sm text-muted-foreground text-center py-8">
             <p className="mb-2">No personal folders yet</p>
@@ -263,12 +291,22 @@ export function PersonalTree() {
           </div>
         )}
         {tree.map(node => renderNode(node))}
+
+        {/* Visual hint for root drop (folders only) */}
+        {draggedNode && draggedNode.type === 'folder' && (
+          <div className={`mt-2 border-2 border-dashed rounded-lg p-3 text-center text-xs text-muted-foreground transition-colors ${
+            rootDropActive ? 'border-primary text-primary' : 'border-border'
+          }`}>
+            Drop here to move to root level
+          </div>
+        )}
       </div>
 
       {/* Context menu */}
       {contextMenu && createPortal(
         <div
           className={contextMenuVariants.container}
+          onMouseDown={(e) => e.stopPropagation()}
           style={{
             left: Math.min(contextMenu.x, window.innerWidth - 188),
             top: Math.min(contextMenu.y, window.innerHeight - 120),
@@ -335,10 +373,7 @@ export function PersonalTree() {
 
       <ConfirmDialog
         open={deleteConfirmOpen}
-        onClose={() => {
-          setDeleteConfirmOpen(false);
-          setSelectedNode(null);
-        }}
+        onClose={() => setDeleteConfirmOpen(false)}
         onConfirm={handleDeleteConfirm}
         title={selectedNode?.type === 'document' ? 'Remove reference?' : 'Delete folder?'}
         message={

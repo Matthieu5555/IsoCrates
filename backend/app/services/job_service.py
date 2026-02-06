@@ -5,9 +5,15 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional, List
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from ..models.generation_job import GenerationJob
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of automatic retries before a job is marked as permanently failed.
+# Used by mark_failed() to decide between re-queuing and giving up.
+# Changing this affects how many times the worker will re-attempt a failed generation.
+MAX_RETRIES = 1
 
 
 class JobService:
@@ -58,7 +64,23 @@ class JobService:
             status="queued",
         )
         self.db.add(job)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            # Concurrent insert won — return the existing job
+            existing = (
+                self.db.query(GenerationJob)
+                .filter(
+                    GenerationJob.repo_url == repo_url,
+                    GenerationJob.commit_sha == commit_sha,
+                    GenerationJob.status.in_(["queued", "running"])
+                )
+                .first()
+            )
+            if existing:
+                return existing
+            raise
         self.db.refresh(job)
 
         logger.info(f"Enqueued job {job.id} for {repo_url} (commit: {commit_sha[:8] if commit_sha else 'N/A'})")
@@ -120,10 +142,11 @@ class JobService:
 
         job.retry_count += 1
 
-        if job.retry_count <= 1:
+        if job.retry_count <= MAX_RETRIES:
             # Re-queue for retry
             job.status = "queued"
-            job.error_message = f"Retry after: {error_message}"
+            previous = job.error_message or ""
+            job.error_message = f"{previous}\n[retry {job.retry_count}] {error_message}".lstrip("\n")
             logger.info(f"Job {job_id} failed, re-queuing (retry {job.retry_count})")
         else:
             # Exhausted retries

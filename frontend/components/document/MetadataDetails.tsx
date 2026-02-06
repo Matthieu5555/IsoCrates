@@ -1,9 +1,9 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Plus, X, Check, Edit2 } from 'lucide-react';
+import { Plus, X, Check, Edit2, RefreshCw } from 'lucide-react';
 import type { Document } from '@/types';
-import { updateDocumentKeywords, updateDocumentRepo } from '@/lib/api/documents';
+import { updateDocumentKeywords, updateDocumentRepo, triggerGeneration } from '@/lib/api/documents';
 import {
   badgeVariants,
   buttonVariants,
@@ -14,15 +14,7 @@ import {
   textVariants,
 } from '@/lib/styles/button-variants';
 import { toast } from '@/lib/notifications/toast';
-
-const KEYWORD_PRESETS = [
-  'Client Facing',
-  'Technical Docs',
-  'Service Users',
-  'Internal',
-  'API Reference',
-  'Architecture',
-];
+import { KEYWORD_PRESETS } from '@/lib/config/constants';
 
 interface MetadataDetailsProps {
   document: Document;
@@ -44,6 +36,7 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
   const [customKeyword, setCustomKeyword] = useState('');
   const [editingRepo, setEditingRepo] = useState(false);
   const [repoUrl, setRepoUrl] = useState(document.repo_url || '');
+  const [isRegenerating, setIsRegenerating] = useState(false);
 
   useEffect(() => { setMounted(true); }, []);
   useEffect(() => { setRepoUrl(document.repo_url || ''); }, [document.repo_url]);
@@ -70,6 +63,19 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
       onDocumentUpdate?.(updated);
     } catch {
       toast.error('Failed to update keywords');
+    }
+  }
+
+  async function handleRegenerate() {
+    if (!document.repo_url) return;
+    setIsRegenerating(true);
+    try {
+      const job = await triggerGeneration(document.repo_url);
+      toast.success('Generation queued', `Job ${job.id.slice(0, 8)} queued. Check back shortly.`);
+    } catch {
+      toast.error('Failed to trigger generation', 'Check that the worker is running.');
+    } finally {
+      setIsRegenerating(false);
     }
   }
 
@@ -191,6 +197,16 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
                   >
                     <Edit2 className="h-3.5 w-3.5" />
                   </button>
+                  {document.repo_url && (
+                    <button
+                      onClick={handleRegenerate}
+                      disabled={isRegenerating}
+                      className={`${buttonVariants.icon} !p-1 opacity-0 group-hover:opacity-100 transition-opacity`}
+                      title="Regenerate documentation for this repository"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
+                    </button>
+                  )}
                 </div>
               )}
             </td>

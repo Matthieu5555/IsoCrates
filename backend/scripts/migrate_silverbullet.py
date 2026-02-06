@@ -129,7 +129,7 @@ def migrate_documents(notes_dir: Path, db_session):
             content_preview = body[:500] if len(body) > 500 else body
 
             # Check if already exists
-            existing = doc_repo.get_by_id(doc_id)
+            existing = doc_repo.get_by_id_optional(doc_id)
             if existing:
                 print(f"[Exists] {doc_id} - Skipping duplicate")
                 skipped_count += 1

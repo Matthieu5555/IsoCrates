@@ -10,7 +10,8 @@ import { MetadataDetails } from './MetadataDetails';
 import { VersionHistory } from './VersionHistory';
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer';
 import { MarkdownEditor } from '../editor/MarkdownEditor';
-import { updateDocument, deleteDocument, getDocumentVersions } from '@/lib/api/documents';
+import { updateDocument, deleteDocument, getDocument, getDocumentVersions } from '@/lib/api/documents';
+import { ApiError } from '@/lib/api/client';
 import { ConfirmDialog } from '../tree/dialogs/ConfirmDialog';
 import { buttonVariants } from '@/lib/styles/button-variants';
 import { toast } from '@/lib/notifications/toast';
@@ -55,11 +56,30 @@ export function DocumentView({ document: initialDocument }: DocumentViewProps) {
     }
   }, [isEditing]);
 
+  // Warn on tab close / navigation when editing with unsaved changes
+  useEffect(() => {
+    if (!isEditing) return;
+    const hasChanges = content !== document.content;
+    if (!hasChanges) return;
+
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [isEditing, content, document.content]);
+
   const handleEdit = () => {
     setIsEditing(true);
   };
 
   const handleCancel = () => {
+    if (content !== document.content) {
+      const confirmed = window.confirm(
+        'You have unsaved changes. Are you sure you want to discard them?'
+      );
+      if (!confirmed) return;
+    }
     setContent(document.content);
     setIsEditing(false);
   };
@@ -67,13 +87,35 @@ export function DocumentView({ document: initialDocument }: DocumentViewProps) {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      const updatedDoc = await updateDocument(document.id, content);
+      const updatedDoc = await updateDocument(document.id, content, undefined, document.version);
       setDocument(updatedDoc);
       setIsEditing(false);
       toast.success('Document saved', 'Your changes have been saved successfully.');
     } catch (error) {
-      console.error('Failed to save document:', error);
-      toast.error('Failed to save document', 'An error occurred while saving. Please try again.');
+      if (error instanceof ApiError && error.status === 409) {
+        const userDraft = content; // capture before overwrite
+        const latest = await getDocument(document.id);
+        setDocument(latest);
+        setContent(latest.content);
+
+        // Copy the user's draft to clipboard so they don't lose work
+        try {
+          await navigator.clipboard.writeText(userDraft);
+          toast.error(
+            'Conflict -- your draft copied to clipboard',
+            'This document was modified by another user. Your in-progress edits have been copied to your clipboard. The editor now shows the latest version.'
+          );
+        } catch {
+          console.warn('[Conflict] User draft preserved in console:', userDraft);
+          toast.error(
+            'Conflict detected',
+            'This document was modified by another user. Your in-progress edits are in the browser console (F12). The editor now shows the latest version.'
+          );
+        }
+      } else {
+        console.error('Failed to save document:', error);
+        toast.error('Failed to save document', 'An error occurred while saving. Please try again.');
+      }
     } finally {
       setIsSaving(false);
     }

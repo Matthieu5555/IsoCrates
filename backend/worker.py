@@ -38,6 +38,12 @@ AGENT_SCRIPT = os.getenv("AGENT_SCRIPT_PATH", "/workspace/openhands_doc.py")
 # How to invoke the agent: "local" runs subprocess directly,
 # "docker" execs into the doc-agent container
 AGENT_MODE = os.getenv("AGENT_MODE", "docker")
+
+# Maximum seconds a single generation job can run before being killed.
+# Large repos with many documents may need up to 20-30 minutes.
+# Used by: _run_job() subprocess call. Changing this affects how long
+# the worker waits before declaring a job timed out.
+JOB_TIMEOUT_SECONDS = 1800  # 30 minutes
 AGENT_CONTAINER = os.getenv("AGENT_CONTAINER", "doc-agent")
 
 logging.basicConfig(
@@ -73,14 +79,19 @@ def process_job(job) -> None:
             cmd,
             capture_output=True,
             text=True,
-            timeout=1800,  # 30 minute timeout per job
+            timeout=JOB_TIMEOUT_SECONDS,
         )
 
         if result.returncode == 0:
             service.complete(job.id)
             logger.info(f"Job {job.id} completed successfully")
         else:
-            error_msg = result.stderr[-500:] if result.stderr else f"Exit code {result.returncode}"
+            # Capture enough stderr to be useful for diagnosis.
+            # 2000 chars covers most Python tracebacks and structured error summaries.
+            # Used by: job_service.fail() → stored in generation_jobs.error_message →
+            # returned by GET /api/jobs → displayed in frontend job status tooltip.
+            max_error_chars = 2000
+            error_msg = result.stderr[-max_error_chars:] if result.stderr else f"Exit code {result.returncode}"
             service.fail(job.id, error_msg)
             logger.warning(f"Job {job.id} failed: {error_msg[:200]}")
 

@@ -47,6 +47,7 @@ def generator(tmp_workspace, tmp_notes_dir, monkeypatch):
         patch("openhands_doc.LLM"),
         patch("openhands_doc.Agent"),
         patch("openhands_doc.Conversation") as MockConv,
+        patch("openhands_doc.LLMSummarizingCondenser"),
         patch("openhands_doc.DocumentRegistry"),
         patch("openhands_doc.DocumentAPIClient") as MockAPI,
         patch("openhands_doc.VersionPriorityEngine") as MockVPE,
@@ -54,6 +55,7 @@ def generator(tmp_workspace, tmp_notes_dir, monkeypatch):
         from openhands_doc import OpenHandsDocGenerator
 
         MockVPE.return_value.should_regenerate.return_value = (True, "No existing document found")
+        MockVPE.return_value.should_regenerate_targeted.return_value = (True, "No existing document found", [])
 
         gen = OpenHandsDocGenerator(
             repo_path=tmp_workspace,

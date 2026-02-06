@@ -9,6 +9,7 @@ import type { DocumentListItem } from '@/types';
 import { dialogVariants, buttonVariants, badgeVariants, listVariants, kbdVariants } from '@/lib/styles/button-variants';
 import { getApiErrorMessage } from '@/lib/api/client';
 import { toast } from '@/lib/notifications/toast';
+import { SEARCH_DEBOUNCE_MS } from '@/lib/config/constants';
 
 interface SearchCommandProps {
   open: boolean;
@@ -72,7 +73,7 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
       } finally {
         setLoading(false);
       }
-    }, 300);
+    }, SEARCH_DEBOUNCE_MS);
 
     return () => clearTimeout(timeoutId);
   }, [query, pathPrefix, keywords, dateRange]);

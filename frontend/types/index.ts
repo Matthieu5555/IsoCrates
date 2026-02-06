@@ -8,6 +8,7 @@ export interface DocumentListItem {
   content_preview: string;
   updated_at: string;
   generation_count: number;
+  version: number;
   deleted_at?: string;
 }
 

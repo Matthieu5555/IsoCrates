@@ -46,6 +46,10 @@ class Document(Base):
     # Generation tracking
     generation_count = Column(Integer, default=1)
 
+    # Optimistic locking — incremented on every content update.
+    # Clients must send their known version; mismatches yield HTTP 409.
+    version = Column(Integer, default=1, nullable=False)
+
     # Soft delete (NULL = active, timestamp = deleted)
     deleted_at = Column(DateTime(timezone=True), nullable=True, default=None)
 

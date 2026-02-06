@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Set
 from ..repositories.dependency_repository import DependencyRepository
 from ..repositories.document_repository import DocumentRepository
-from ..schemas.dependency import DependencyCreate, DependencyResponse
+from ..schemas.dependency import DependencyCreate, DependencyResponse, DocumentDependencies, BrokenLinkInfo
 from ..models import Dependency
 from ..exceptions import DocumentNotFoundError, CircularDependencyError, SelfDependencyError, ValidationError
 
@@ -57,15 +57,11 @@ class DependencyService:
         Raises:
             ValueError: If validation fails
         """
-        # Validate source document exists
+        # Validate source document exists (raises DocumentNotFoundError)
         source_doc = self.doc_repo.get_by_id(dependency.from_doc_id)
-        if not source_doc:
-            raise DocumentNotFoundError(dependency.from_doc_id)
 
-        # Validate target document exists
+        # Validate target document exists (raises DocumentNotFoundError)
         target_doc = self.doc_repo.get_by_id(dependency.to_doc_id)
-        if not target_doc:
-            raise DocumentNotFoundError(dependency.to_doc_id)
 
         # Validate no self-links
         if dependency.from_doc_id == dependency.to_doc_id:
@@ -84,12 +80,12 @@ class DependencyService:
         # All validations passed - create dependency
         return self.dep_repo.create(dependency)
 
-    def get_dependencies(self, doc_id: str) -> dict:
+    def get_dependencies(self, doc_id: str) -> DocumentDependencies:
         """
         Get all dependencies for a document.
 
         Returns:
-            dict with 'outgoing' and 'incoming' dependency lists
+            DocumentDependencies with outgoing and incoming lists
         """
         return self.dep_repo.get_by_document(doc_id)
 
@@ -158,7 +154,10 @@ class DependencyService:
         wikilink_targets = self._extract_wikilinks(content)
 
         for target in wikilink_targets:
-            target_doc_id = self._resolve_wikilink(target)
+            # Skip URL-like targets (not internal wikilinks)
+            if target.startswith(('http://', 'https://', 'ftp://')):
+                continue
+            target_doc_id = self.resolve_wikilink(target)
             if target_doc_id and target_doc_id != doc_id:
                 dependency = DependencyCreate(
                     from_doc_id=doc_id,
@@ -175,12 +174,22 @@ class DependencyService:
                     )
 
     def _extract_wikilinks(self, content: str) -> Set[str]:
-        """Extract all wikilink targets from markdown content."""
+        """Extract all wikilink targets from markdown content.
+
+        Handles both simple [[Target]] and display text [[Target|display]] syntax.
+        For [[Target|display]], only the Target part is returned.
+        """
         pattern = r'\[\[([^\]]+)\]\]'
         matches = re.findall(pattern, content)
-        return set(matches)
+        # Handle pipe syntax: [[Target|display text]] -> Target
+        targets = set()
+        for match in matches:
+            target = match.split('|')[0].strip()
+            if target:
+                targets.add(target)
+        return targets
 
-    def _resolve_wikilink(self, target: str) -> Optional[str]:
+    def resolve_wikilink(self, target: str) -> Optional[str]:
         """Resolve a wikilink target to a document ID.
 
         Uses exact title match, then case-insensitive title match, then
@@ -234,15 +243,15 @@ class DependencyService:
 
         from ..schemas.version import VersionCreate
         from ..repositories.version_repository import VersionRepository
-        from ..services.content_utils import generate_content_preview
+        from ..repositories.document_repository import generate_content_preview
 
         version_repo = VersionRepository(self.db)
         deps = self.dep_repo.get_by_document(doc_id)
-        incoming = deps.get("incoming", [])
+        incoming = deps.incoming
 
         updated_count = 0
         for dep in incoming:
-            referring_doc = self.doc_repo.get_by_id(dep.from_doc_id)
+            referring_doc = self.doc_repo.get_by_id_optional(dep.from_doc_id)
             if not referring_doc:
                 continue
 
@@ -264,30 +273,55 @@ class DependencyService:
             self.replace_document_dependencies(referring_doc.id, referring_doc.content)
             updated_count += 1
 
-        if updated_count > 0:
-            self.db.commit()
-
         return updated_count
 
-    def get_broken_links(self, doc_id: str) -> list[dict]:
+    def update_incoming_dependencies(self, new_doc_id: str, new_doc_title: str) -> int:
+        """Find existing documents with wikilinks to new_doc_title and update their dependencies.
+
+        Called when a new document is created to catch forward references - documents
+        that were created with [[new_doc_title]] wikilinks before this document existed.
+
+        Returns count of documents updated.
+        """
+        from ..models import Document
+
+        # Find documents containing [[new_doc_title]] in their content
+        pattern = f"[[{new_doc_title}]]"
+        docs = self.db.query(Document).filter(
+            Document.deleted_at.is_(None),
+            Document.content.contains(pattern)
+        ).all()
+
+        updated = 0
+        for doc in docs:
+            if doc.id != new_doc_id:
+                self.replace_document_dependencies(doc.id, doc.content)
+                updated += 1
+
+        return updated
+
+    def get_broken_links(self, doc_id: str) -> list[BrokenLinkInfo]:
         """Check all wikilinks in a document and report their resolution status.
 
-        Returns a list of dicts: [{target, resolved, resolved_doc_id}].
+        Returns a list of BrokenLinkInfo objects.
         An empty list means no wikilinks (not an error).
         """
-        doc = self.doc_repo.get_by_id(doc_id)
+        doc = self.doc_repo.get_by_id_optional(doc_id)
         if not doc:
             return []
 
         targets = self._extract_wikilinks(doc.content)
         results = []
         for target in sorted(targets):
-            resolved_id = self._resolve_wikilink(target)
-            results.append({
-                "target": target,
-                "resolved": resolved_id is not None,
-                "resolved_doc_id": resolved_id,
-            })
+            # Skip URL-like targets (not internal wikilinks)
+            if target.startswith(('http://', 'https://', 'ftp://')):
+                continue
+            resolved_id = self.resolve_wikilink(target)
+            results.append(BrokenLinkInfo(
+                target=target,
+                resolved=resolved_id is not None,
+                resolved_doc_id=resolved_id,
+            ))
         return results
 
     def _has_path(self, start: str, target: str, visited: Set[str]) -> bool:

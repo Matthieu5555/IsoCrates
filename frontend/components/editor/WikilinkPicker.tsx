@@ -20,6 +20,13 @@ interface WikilinkPickerProps {
  * switches to search results as the user types. Keyboard navigation with
  * ArrowUp/Down and Enter to select. Escape or clicking outside closes it.
  */
+// Number of document suggestions shown in the wikilink picker dropdown.
+// Affects both initial "recent documents" list and search result count.
+const SUGGESTION_COUNT = 8;
+// Milliseconds to wait after typing before firing the search API call.
+// Balances responsiveness with avoiding excessive API requests.
+const SEARCH_DEBOUNCE_MS = 200;
+
 export function WikilinkPicker({ anchorRef, open, onClose, onSelect }: WikilinkPickerProps) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<(SearchResult | DocumentListItem)[]>([]);
@@ -45,7 +52,7 @@ export function WikilinkPicker({ anchorRef, open, onClose, onSelect }: WikilinkP
       setResults([]);
       setSelectedIndex(0);
       // Load recent docs as default suggestions
-      getRecentDocuments(8).then(setResults).catch(() => {});
+      getRecentDocuments(SUGGESTION_COUNT).then(setResults).catch(() => {});
       setTimeout(() => inputRef.current?.focus(), 0);
     }
   }, [open]);
@@ -68,13 +75,13 @@ export function WikilinkPicker({ anchorRef, open, onClose, onSelect }: WikilinkP
     if (!open) return;
     if (!query || query.length < 2) {
       // Show recent docs when query is cleared
-      if (!query) getRecentDocuments(8).then(setResults).catch(() => {});
+      if (!query) getRecentDocuments(SUGGESTION_COUNT).then(setResults).catch(() => {});
       return;
     }
     setLoading(true);
     const id = setTimeout(async () => {
       try {
-        const searchResults = await searchDocuments(query, 8);
+        const searchResults = await searchDocuments(query, SUGGESTION_COUNT);
         setResults(searchResults);
         setSelectedIndex(0);
       } catch {
@@ -82,7 +89,7 @@ export function WikilinkPicker({ anchorRef, open, onClose, onSelect }: WikilinkP
       } finally {
         setLoading(false);
       }
-    }, 200);
+    }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(id);
   }, [query, open]);
 
@@ -108,7 +115,7 @@ export function WikilinkPicker({ anchorRef, open, onClose, onSelect }: WikilinkP
   return (
     <div
       ref={containerRef}
-      className="fixed z-[60] w-80 rounded-lg border border-border bg-popover shadow-lg"
+      className="fixed z-[60] w-80 rounded-lg border border-border bg-background shadow-lg"
       style={{ top: position.top, left: position.left }}
     >
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">

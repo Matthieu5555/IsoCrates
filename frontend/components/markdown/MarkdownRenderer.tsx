@@ -5,8 +5,33 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkWikiLink from 'remark-wiki-link';
 import rehypeHighlight from 'rehype-highlight';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+import { ExternalLink } from 'lucide-react';
 import { WikiLink } from './WikiLink';
 import { MermaidBlock } from './MermaidBlock';
+
+/**
+ * Custom sanitization schema based on GitHub's defaults.
+ * Allows additional elements needed for syntax highlighting and search snippets.
+ */
+const sanitizeSchema = {
+  ...defaultSchema,
+  tagNames: [
+    ...(defaultSchema.tagNames || []),
+    'mark',  // For FTS search result highlighting
+  ],
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [...(defaultSchema.attributes?.code || []), 'className'],
+    span: [...(defaultSchema.attributes?.span || []), 'className'],
+    mark: [],  // Allow <mark> with no special attributes
+    a: [...(defaultSchema.attributes?.a || []), 'className', 'href'],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    href: [...(defaultSchema.protocols?.href || []), '#wiki'],
+  },
+};
 
 interface MarkdownRendererProps {
   content: string;
@@ -36,15 +61,26 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
             {
               pageResolver: (name: string) => [name.replace(/ /g, '-').toLowerCase()],
               hrefTemplate: (permalink: string) => `#wiki:${permalink}`,
+              aliasDivider: '|',
             },
           ],
         ]}
-        rehypePlugins={[rehypeHighlight]}
+        rehypePlugins={[rehypeHighlight, [rehypeSanitize, sanitizeSchema]]}
         components={{
           a: ({ node, children, href, ...props }) => {
             if (href?.startsWith('#wiki:')) {
               const target = href.replace('#wiki:', '').replace(/-/g, ' ');
               return <WikiLink target={target}>{children}</WikiLink>;
+            }
+            const isExternal = href?.startsWith('http://') || href?.startsWith('https://');
+            if (isExternal) {
+              return (
+                <a href={href} target="_blank" rel="noopener noreferrer"
+                   className="inline-flex items-center gap-0.5" {...props}>
+                  {children}
+                  <ExternalLink className="inline h-3 w-3 opacity-50 shrink-0" />
+                </a>
+              );
             }
             return <a href={href} {...props}>{children}</a>;
           },

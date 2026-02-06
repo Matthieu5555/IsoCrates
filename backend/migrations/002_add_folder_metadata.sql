@@ -1,4 +1,4 @@
--- Migration: Add folder metadata table
+->-- Migration: Add folder metadata table
 -- Purpose: Support empty folders without placeholder documents
 -- Date: 2026-01-29
 -- Depends on: 001_make_repo_fields_optional.sql

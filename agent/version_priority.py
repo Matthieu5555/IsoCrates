@@ -5,7 +5,7 @@ Implements decision logic to respect human edits while keeping
 AI-generated documentation fresh.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 from api_client import DocumentAPIClient
@@ -64,6 +64,11 @@ class VersionPriorityEngine:
 
         if not existing_doc:
             return True, "No existing document found"
+
+        # Rule 1b: Check if document has actual content (not empty shell from failed generation)
+        content = existing_doc.get("content", "")
+        if not content or not content.strip():
+            return True, "Existing document is empty (failed previous generation)"
 
         print(f"   Found existing document")
 
@@ -197,3 +202,53 @@ class VersionPriorityEngine:
 
         # Repo must have changed (since we already checked unchanged above)
         return True, f"Repository changed since last AI generation ({age_days} days ago), updating documentation"
+
+    def should_regenerate_targeted(
+        self,
+        doc_id: str,
+        current_source_hashes: dict[str, str],
+    ) -> tuple[bool, str, list[str]]:
+        """Targeted regeneration: compare stored source file hashes against current.
+
+        This is a faster check than should_regenerate() — it skips version/commit
+        analysis and directly checks if the source files a doc was generated from
+        have changed.
+
+        Args:
+            doc_id: Document ID
+            current_source_hashes: {file_path: sha256_hex} computed from current files
+
+        Returns:
+            (should_regenerate, reason, changed_files)
+        """
+        if not current_source_hashes:
+            return True, "No source files to check", []
+
+        # Get stored source hashes from latest version
+        versions = self.api_client.get_document_versions(doc_id)
+        if not versions:
+            return True, "No version history", []
+
+        latest = versions[0]
+        author_metadata = latest.get("author_metadata", {})
+        stored_hashes = author_metadata.get("source_hashes", {})
+
+        if not stored_hashes:
+            # Legacy doc without provenance — fall through to commit-level check
+            return True, "No stored source hashes (legacy doc)", []
+
+        # Compare hashes
+        changed = []
+        for fpath, current_hash in current_source_hashes.items():
+            stored_hash = stored_hashes.get(fpath)
+            if stored_hash != current_hash:
+                changed.append(fpath)
+
+        # Check for new files not in stored hashes
+        new_files = [f for f in current_source_hashes if f not in stored_hashes]
+        changed.extend(new_files)
+
+        if not changed:
+            return False, f"All {len(current_source_hashes)} source files unchanged", []
+
+        return True, f"{len(changed)} source file(s) changed: {', '.join(changed[:3])}", changed

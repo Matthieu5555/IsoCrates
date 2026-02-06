@@ -63,15 +63,17 @@ class FolderService:
         """
         folder_id = self._generate_folder_id(data.path)
 
-        existing = self.folder_repo.get_by_id(folder_id)
+        existing = self.folder_repo.get_by_id_optional(folder_id)
         if existing:
             return existing
 
         self._ensure_ancestors(data.path)
-        return self.folder_repo.create(folder_id, data)
+        result = self.folder_repo.create(folder_id, data)
+        self.db.commit()
+        return result
 
     def get_folder(self, folder_id: str) -> Optional[FolderMetadata]:
-        return self.folder_repo.get_by_id(folder_id)
+        return self.folder_repo.get_by_id_optional(folder_id)
 
     def get_folder_by_path(self, path: str) -> Optional[FolderMetadata]:
         return self.folder_repo.get_by_path(path)
@@ -87,7 +89,9 @@ class FolderService:
     def update_folder(
         self, folder_id: str, data: FolderMetadataUpdate
     ) -> Optional[FolderMetadata]:
-        return self.folder_repo.update(folder_id, data)
+        result = self.folder_repo.update(folder_id, data)
+        self.db.commit()
+        return result
 
     def delete_folder(self, folder_path: str, action: str = "move_up") -> FolderOperationResponse:
         """Delete a folder. Idempotent: succeeds with zero affected if path is missing.
@@ -162,7 +166,10 @@ class FolderService:
                 for i in range(1, len(parts) + 1):
                     active_paths.add("/".join(parts[:i]))
 
-        return self.folder_repo.cleanup_orphans(active_paths)
+        count = self.folder_repo.cleanup_orphans(active_paths)
+        if count > 0:
+            self.db.commit()
+        return count
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -170,6 +177,8 @@ class FolderService:
 
     def _generate_folder_id(self, path: str) -> str:
         """Deterministic folder ID from path."""
+        # 12 hex chars = 48 bits, matching DOC_ID_PATH_HASH_LENGTH in document_service.py.
+        # Changing this would break existing folder IDs in the database.
         path_hash = hashlib.sha256(path.encode()).hexdigest()[:12]
         return f"folder-{path_hash}"
 
@@ -182,7 +191,7 @@ class FolderService:
         for i in range(1, len(segments)):
             ancestor_path = "/".join(segments[:i])
             ancestor_id = self._generate_folder_id(ancestor_path)
-            if not self.folder_repo.get_by_id(ancestor_id):
+            if not self.folder_repo.get_by_id_optional(ancestor_id):
                 self.folder_repo.create(
                     ancestor_id, FolderMetadataCreate(path=ancestor_path)
                 )
@@ -253,8 +262,8 @@ class FolderService:
             )
             .all()
         )
-        for m in metas:
-            self.db.delete(m)
+        for folder_meta in metas:
+            self.db.delete(folder_meta)
 
         self.db.commit()
         return FolderOperationResponse(

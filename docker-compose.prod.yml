@@ -1,0 +1,54 @@
+# Production overrides for IsoCrates
+#
+# Usage:
+#   ./deploy.sh                                          (interactive)
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# Adds Caddy reverse proxy for automatic HTTPS, overrides dev defaults
+# with production-safe values, and removes host port bindings from
+# internal services (all traffic goes through Caddy).
+
+services:
+  # Caddy reverse proxy — automatic HTTPS via Let's Encrypt
+  caddy:
+    image: caddy:2-alpine
+    container_name: isocrates-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend-api
+      - frontend
+    restart: unless-stopped
+
+  # Backend: production overrides
+  backend-api:
+    ports: []
+    environment:
+      ENVIRONMENT: production
+      AUTH_ENABLED: "true"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      CORS_ALLOWED_ORIGINS: "https://${DOMAIN}"
+      DATABASE_URL: postgresql://isocrates:${POSTGRES_PASSWORD}@postgres:5432/isocrates
+      LOG_FORMAT: json
+
+  # PostgreSQL: use generated password
+  postgres:
+    ports: []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+  # Frontend: point API URL at real domain
+  frontend:
+    ports: []
+    environment:
+      NEXT_PUBLIC_API_URL: "https://${DOMAIN}"
+      NEXT_PUBLIC_API_URL_INTERNAL: http://backend-api:8000
+
+volumes:
+  caddy_data:
+  caddy_config:

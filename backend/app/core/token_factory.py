@@ -101,7 +101,7 @@ def decode_token(token: str, secret: str, algorithm: str = "HS256") -> Optional[
             role=payload.get("role", ""),
             exp=datetime.fromtimestamp(exp, tz=timezone.utc),
         )
-    except Exception:
+    except (json.JSONDecodeError, KeyError, ValueError, IndexError):
         return None
 
 

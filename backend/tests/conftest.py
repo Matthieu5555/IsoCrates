@@ -3,6 +3,10 @@
 All tests use an in-memory SQLite database so they are fast, isolated, and
 leave no artefacts. The ``client`` fixture provides a ``TestClient`` wired
 to the real FastAPI app with the DB dependency overridden.
+
+Each test gets its own engine and connection via StaticPool, guaranteeing
+complete isolation. StaticPool ensures all ORM sessions for that test share
+one connection (required for in-memory SQLite).
 """
 
 import os
@@ -14,36 +18,36 @@ os.environ["LOG_FORMAT"] = "text"
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
 from app.database import Base, get_db
 from app.main import app
 from app.core.token_factory import create_token
 from app.core.config import settings
-
-
-@pytest.fixture(scope="session")
-def engine():
-    """In-memory SQLite engine shared across the test session."""
-    eng = create_engine("sqlite://", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=eng)
-    return eng
+from app.middleware.request_context import _rate_buckets
 
 
 @pytest.fixture()
-def db(engine):
-    """Per-test database session. Rolls back after each test."""
-    connection = engine.connect()
-    transaction = connection.begin()
-    TestSession = sessionmaker(bind=connection)
-    session = TestSession()
+def db():
+    """Per-test database session on a fresh in-memory database.
 
+    Creates a new engine with StaticPool per test, ensuring complete
+    isolation. StaticPool guarantees all connections share one underlying
+    SQLite connection (required because in-memory SQLite databases are
+    per-connection).
+    """
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session = Session(bind=engine)
     yield session
-
     session.close()
-    transaction.rollback()
-    connection.close()
+    engine.dispose()
 
 
 @pytest.fixture()
@@ -54,6 +58,7 @@ def client(db):
         yield db
 
     app.dependency_overrides[get_db] = _override_get_db
+    _rate_buckets.clear()  # Reset rate limiter so tests don't hit 429
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

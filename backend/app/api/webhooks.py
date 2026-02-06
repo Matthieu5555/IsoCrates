@@ -2,6 +2,7 @@
 
 import hmac
 import hashlib
+import json
 import logging
 from fastapi import APIRouter, Depends, Request, HTTPException
 from sqlalchemy.orm import Session
@@ -37,7 +38,8 @@ def _verify_github_signature(payload: bytes, signature_header: str, secret: str)
         hashlib.sha256
     ).hexdigest()
 
-    received_sig = signature_header[7:]  # Strip "sha256=" prefix
+    SHA256_PREFIX = "sha256="
+    received_sig = signature_header[len(SHA256_PREFIX):]
     return hmac.compare_digest(expected_sig, received_sig)
 
 
@@ -70,7 +72,7 @@ async def github_webhook(
     # Parse payload
     try:
         payload = await request.json()
-    except Exception:
+    except (ValueError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
     # Only process push events

@@ -25,7 +25,7 @@ class PersonalTreeRepository:
             sort_order=0,
         )
         self.db.add(folder)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(folder)
         return folder
 
@@ -53,16 +53,28 @@ class PersonalTreeRepository:
         if not folder:
             return None
         folder.parent_id = new_parent_id
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(folder)
         return folder
 
     def delete_folder(self, folder_id: str) -> bool:
+        """Delete a folder and all its children (subfolders and document refs) recursively."""
         folder = self.get_folder(folder_id)
         if not folder:
             return False
+
+        # Recursively delete all child folders first
+        children = self.get_children(folder_id)
+        for child in children:
+            self.delete_folder(child.folder_id)
+
+        # Delete all document refs in this folder
+        refs = self.get_refs_by_folder(folder_id)
+        for ref in refs:
+            self.db.delete(ref)
+
+        # Now delete the folder itself
         self.db.delete(folder)
-        self.db.commit()
         return True
 
     # --- Document refs ---
@@ -77,7 +89,7 @@ class PersonalTreeRepository:
             sort_order=0,
         )
         self.db.add(ref)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(ref)
         return ref
 
@@ -116,7 +128,7 @@ class PersonalTreeRepository:
         if not ref:
             return None
         ref.folder_id = target_folder_id
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(ref)
         return ref
 
@@ -125,7 +137,6 @@ class PersonalTreeRepository:
         if not ref:
             return False
         self.db.delete(ref)
-        self.db.commit()
         return True
 
     # --- Helpers ---

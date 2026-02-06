@@ -23,8 +23,10 @@ import {
   Columns,
   Rows,
   AtSign,
+  Link as LinkIcon,
 } from 'lucide-react';
 import { WikilinkPicker } from './WikilinkPicker';
+import { LinkInsertDialog } from './LinkInsertDialog';
 
 interface EditorToolbarProps {
   editor: Editor;
@@ -46,10 +48,33 @@ interface ToolbarButton {
  */
 export function EditorToolbar({ editor }: EditorToolbarProps) {
   const [wikilinkPickerOpen, setWikilinkPickerOpen] = useState(false);
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const wikilinkButtonRef = useRef<HTMLButtonElement>(null);
+  const linkButtonRef = useRef<HTMLButtonElement>(null);
 
   const handleWikilinkSelect = (title: string) => {
     editor.chain().focus().insertWikilink(title).run();
+  };
+
+  const handleLinkInsert = (text: string, url: string) => {
+    const { from, to } = editor.state.selection;
+    if (from !== to) {
+      // Selection exists — wrap it with a link
+      editor.chain().focus().setLink({ href: url }).run();
+    } else {
+      // No selection — insert new text with link
+      editor.chain().focus().insertContent({
+        type: 'text',
+        text,
+        marks: [{ type: 'link', attrs: { href: url, target: '_blank', rel: 'noopener noreferrer' } }],
+      }).run();
+    }
+  };
+
+  const getSelectedText = (): string => {
+    const { from, to } = editor.state.selection;
+    if (from === to) return '';
+    return editor.state.doc.textBetween(from, to);
   };
 
   const groups: ToolbarButton[][] = [
@@ -230,6 +255,29 @@ export function EditorToolbar({ editor }: EditorToolbarProps) {
         open={wikilinkPickerOpen}
         onClose={() => setWikilinkPickerOpen(false)}
         onSelect={handleWikilinkSelect}
+      />
+
+      {/* External link button */}
+      <button
+        ref={linkButtonRef}
+        type="button"
+        onClick={() => setLinkDialogOpen(!linkDialogOpen)}
+        title="Insert external link"
+        className={`rounded p-1.5 transition-colors ${
+          linkDialogOpen
+            ? 'bg-primary/15 text-primary'
+            : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+        }`}
+      >
+        <LinkIcon className="h-4 w-4" />
+      </button>
+
+      <LinkInsertDialog
+        anchorRef={linkButtonRef}
+        open={linkDialogOpen}
+        onClose={() => setLinkDialogOpen(false)}
+        onSubmit={handleLinkInsert}
+        initialText={linkDialogOpen ? getSelectedText() : ''}
       />
     </div>
   );

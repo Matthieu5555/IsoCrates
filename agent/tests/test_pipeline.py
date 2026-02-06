@@ -210,6 +210,7 @@ class TestAPIPayload:
 
         with patch("openhands_doc.VersionPriorityEngine") as MockVPE:
             MockVPE.return_value.should_regenerate.return_value = (True, "test")
+            MockVPE.return_value.should_regenerate_targeted.return_value = (True, "test", [])
             result = gen.generate_document(
                 doc_spec, SAMPLE_BLUEPRINT,
                 {"all_docs": [], "related_docs": [], "count": 0, "related_count": 0},
@@ -328,6 +329,7 @@ class TestGenerateAllFlow:
 
         with patch("openhands_doc.VersionPriorityEngine") as MockVPE:
             MockVPE.return_value.should_regenerate.return_value = (False, "Fresh human edit")
+            MockVPE.return_value.should_regenerate_targeted.return_value = (False, "Fresh human edit", [])
 
             result = gen.generate_document(
                 doc_spec, SAMPLE_BLUEPRINT,

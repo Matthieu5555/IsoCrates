@@ -94,6 +94,62 @@ class DocumentAPIClient:
                         return self._fallback_to_file(doc_data, fallback_path)
                     raise Exception(f"API POST failed after {self.max_retries} attempts: {exc}")
 
+    # ----- ID generation (single source of truth is the backend) ----------
+
+    def generate_doc_id(
+        self,
+        repo_url: Optional[str],
+        path: str = "",
+        title: str = "",
+        doc_type: str = "",
+    ) -> str:
+        """Generate a stable document ID via the backend API.
+
+        The backend owns the ID generation algorithm. This call ensures
+        agent and backend always produce identical IDs.
+        """
+        endpoint = f"{self.api_url}/api/docs/generate-id"
+        payload = {"repo_url": repo_url, "path": path, "title": title, "doc_type": doc_type}
+        try:
+            response = requests.post(
+                endpoint,
+                json=payload,
+                timeout=self.timeout,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            return response.json()["doc_id"]
+        except requests.exceptions.RequestException as exc:
+            logger.warning("generate_doc_id API call failed: %s — using local fallback", exc)
+            return self._generate_doc_id_local(repo_url, path, title, doc_type)
+
+    @staticmethod
+    def _generate_doc_id_local(
+        repo_url: Optional[str],
+        path: str = "",
+        title: str = "",
+        doc_type: str = "",
+    ) -> str:
+        """Offline fallback for ID generation (mirrors backend algorithm).
+
+        Only used when the backend API is unreachable. The backend's
+        POST /api/docs/generate-id is the authoritative source.
+        """
+        import hashlib
+        HASH_LEN = 12
+        if not repo_url:
+            full_path = f"{path}/{title}" if path else title
+            path_hash = hashlib.sha256(full_path.encode()).hexdigest()[:HASH_LEN]
+            return f"doc-standalone-{path_hash}"
+        repo_hash = hashlib.sha256(repo_url.encode()).hexdigest()[:HASH_LEN]
+        if path or title:
+            full_path = f"{path}/{title}" if path else title
+            path_hash = hashlib.sha256(full_path.encode()).hexdigest()[:HASH_LEN]
+            return f"doc-{repo_hash}-{path_hash}"
+        if doc_type:
+            return f"doc-{repo_hash}-{doc_type}"
+        return f"doc-{repo_hash}-default"
+
     # ----- read operations -------------------------------------------------
 
     def get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:

@@ -61,12 +61,8 @@ def create_folder_metadata(
     if existing:
         raise HTTPException(status_code=409, detail=f"Folder already exists: {data.path}")
 
-    try:
-        folder = service.create_folder(data)
-        return folder
-    except Exception as e:
-        logger.error(f"Failed to create folder: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    folder = service.create_folder(data)
+    return folder
 
 
 @router.get("/metadata/{folder_id}", response_model=FolderMetadataResponse)
@@ -128,8 +124,6 @@ def move_folder(
         return service.move_folder(request.source_path, request.target_path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to move folder: {str(e)}")
 
 
 @router.delete("/{folder_path:path}", response_model=FolderOperationResponse)
@@ -151,9 +145,6 @@ def delete_folder(
         return service.delete_folder(folder_path, action)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to delete folder {folder_path}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete folder: {str(e)}")
 
 
 # -- Cleanup --------------------------------------------------------------

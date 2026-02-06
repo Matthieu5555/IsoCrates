@@ -1,4 +1,8 @@
-"""Document API endpoints with path-based permission checks."""
+"""Document API endpoints with path-based permission checks.
+
+Endpoints are thin — DocumentService handles the full lifecycle
+(CRUD, versioning, wikilink dependencies) as a deep module.
+"""
 
 from fastapi import APIRouter, Depends, Query, Body, HTTPException
 from sqlalchemy.orm import Session
@@ -7,8 +11,9 @@ from typing import List, Optional
 from ..core.auth import AuthContext, require_auth, require_admin, optional_auth
 from ..database import get_db
 from datetime import datetime
-from ..schemas.document import DocumentCreate, DocumentResponse, DocumentListResponse, DocumentUpdate, DocumentMoveRequest, DocumentKeywordsUpdate, DocumentRepoUpdate, SearchResultResponse, BatchOperation, BatchResult
+from ..schemas.document import DocumentCreate, DocumentResponse, DocumentListResponse, DocumentUpdate, DocumentMoveRequest, DocumentKeywordsUpdate, DocumentRepoUpdate, SearchResultResponse, BatchOperation, BatchResult, GenerateIdRequest, GenerateIdResponse
 from ..services import DocumentService
+from ..services.dependency_service import DependencyService
 from ..services.permission_service import check_permission, filter_paths_by_grants
 from ..exceptions import DocumentNotFoundError, ForbiddenError
 
@@ -49,8 +54,10 @@ def create_document(
     """Create or update a document (upsert)."""
     if not check_permission(auth.grants, document.path, "edit"):
         raise ForbiddenError("No edit access to this path")
+
     service = DocumentService(db)
-    return service.create_or_update_document(document)
+    doc, _is_new = service.create_or_update_document(document)
+    return doc
 
 
 @router.get("", response_model=List[DocumentListResponse])
@@ -99,11 +106,10 @@ def search_documents(
     """Full-text search with optional filters, scoped to user's grants."""
     service = DocumentService(db)
     keyword_list = [k.strip() for k in keywords.split(',')] if keywords else None
-    results = service.search_documents(
+    return service.search_documents(
         q, limit, path_prefix, keyword_list, date_from, date_to,
         allowed_prefixes=_prefixes_from_auth(auth),
     )
-    return [SearchResultResponse(**r) for r in results]
 
 
 @router.get("/recent", response_model=List[DocumentListResponse])
@@ -138,65 +144,78 @@ def batch_operation(
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(require_auth),
 ):
-    """Execute a batch operation on multiple documents.
+    """Execute a batch operation on multiple documents with permission filtering."""
+    service = DocumentService(db)
+    return service.execute_batch_authorized(
+        operation=batch.operation,
+        doc_ids=batch.doc_ids,
+        params=batch.params,
+        grants=auth.grants,
+        is_service_account=auth.is_service_account,
+    )
 
-    Checks permissions per document. Unauthorized documents are skipped
-    and reported as errors in the response.
+
+@router.post("/generate-id", response_model=GenerateIdResponse)
+def generate_id(
+    request: GenerateIdRequest,
+    db: Session = Depends(get_db),
+):
+    """Generate a stable document ID from repo URL, path, and title.
+
+    Pure function — no side effects, no auth required. This is the single
+    source of truth for document ID generation, eliminating the need for
+    duplicate implementations in the agent or other clients.
     """
     service = DocumentService(db)
+    doc_id = service.generate_doc_id(
+        repo_url=request.repo_url,
+        path=request.path,
+        title=request.title,
+        doc_type=request.doc_type,
+    )
+    return GenerateIdResponse(doc_id=doc_id)
 
-    # Service accounts (the doc agent) can delete AI-authored docs only.
-    # This avoids needing path-level grants for every doc the planner creates,
-    # while preventing the agent from touching human-authored content.
-    if auth.is_service_account and batch.operation == "delete":
-        allowed_ids = []
-        denied_ids = []
-        for doc_id in batch.doc_ids:
-            doc = service.get_document(doc_id)
-            if doc is None:
-                denied_ids.append(doc_id)
-                continue
-            latest = service.version_repo.get_latest(doc_id)
-            if latest and latest.author_type == "ai":
-                allowed_ids.append(doc_id)
-            else:
-                denied_ids.append(doc_id)
-    else:
-        # Normal user: check path-based permissions
-        action = "delete" if batch.operation == "delete" else "edit"
-        allowed_ids = []
-        denied_ids = []
-        for doc_id in batch.doc_ids:
-            doc = service.get_document(doc_id)
-            if doc is not None and check_permission(auth.grants, doc.path, action):
-                allowed_ids.append(doc_id)
-            else:
-                denied_ids.append(doc_id)
 
-    result = service.execute_batch(batch.operation, allowed_ids, batch.params)
+@router.post("/batch-titles", response_model=dict)
+def batch_titles(
+    doc_ids: List[str] = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    auth: Optional[AuthContext] = Depends(optional_auth),
+):
+    """Resolve a list of document IDs to their titles. Returns {id: title} map.
 
-    # Add denied docs to error count
-    if denied_ids:
-        result_dict = result if isinstance(result, dict) else result.__dict__
-        result_dict["failed"] = result_dict.get("failed", 0) + len(denied_ids)
-        errors = result_dict.get("errors", [])
-        for doc_id in denied_ids:
-            errors.append({"doc_id": doc_id, "error": "Access denied"})
-        result_dict["errors"] = errors
-
+    Capped at 100 IDs per request. Respects permission grants — documents
+    the caller cannot read are silently omitted from results.
+    """
+    service = DocumentService(db)
+    result = {}
+    for doc_id in doc_ids[:100]:
+        doc = service.get_document(doc_id)
+        if doc is not None:
+            if auth is None or check_permission(auth.grants, doc.path, "read"):
+                result[doc_id] = doc.title
     return result
 
 
 @router.get("/resolve/", response_model=dict)
 def resolve_wikilink(
     target: str = Query(..., min_length=1),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: Optional[AuthContext] = Depends(optional_auth),
 ):
-    """Resolve a wikilink target to a document ID."""
-    service = DocumentService(db)
-    doc_id = service.resolve_wikilink(target)
+    """Resolve a wikilink target to a document ID (respects permission grants)."""
+    dep_service = DependencyService(db)
+    doc_id = dep_service.resolve_wikilink(target)
     if not doc_id:
         raise HTTPException(status_code=404, detail=f"Could not resolve wikilink: {target}")
+
+    # When auth is active, verify caller can see the resolved document
+    if auth is not None:
+        service = DocumentService(db)
+        doc = service.get_document(doc_id)
+        if doc is None or not check_permission(auth.grants, doc.path, "read"):
+            raise HTTPException(status_code=404, detail=f"Could not resolve wikilink: {target}")
+
     return {"target": target, "doc_id": doc_id}
 
 
@@ -237,9 +256,8 @@ def move_document(
 ):
     """Move a document to a different folder path. Requires edit on both source and target."""
     service = DocumentService(db)
-    doc = _check_doc_access(service, auth, doc_id, "edit")
+    _check_doc_access(service, auth, doc_id, "edit")
 
-    # Also check edit permission on the target path
     if not check_permission(auth.grants, request.target_path, "edit"):
         raise ForbiddenError("No edit access to target path")
 
@@ -299,16 +317,16 @@ def restore_document(
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(require_auth),
 ):
-    """Restore a soft-deleted document. Requires edit permission."""
-    service = DocumentService(db)
-    # Restore needs to check on the trashed doc — use edit permission
-    if not check_permission(auth.grants, "", "edit"):
-        # Can't check path of trashed doc easily; require at least some edit grant
-        raise ForbiddenError("No edit access")
-    doc = service.restore_document(doc_id)
-    if not doc:
+    """Restore a soft-deleted document. Requires edit permission on the doc's path."""
+    from ..repositories.document_repository import DocumentRepository
+    doc_repo = DocumentRepository(db)
+    doc = doc_repo.get_by_id_including_deleted(doc_id)
+    if doc is None:
         raise DocumentNotFoundError(doc_id)
-    return doc
+    if not check_permission(auth.grants, doc.path or "", "edit"):
+        raise DocumentNotFoundError(doc_id)  # 404 to avoid leaking existence
+    service = DocumentService(db)
+    return service.restore_document(doc_id)
 
 
 @router.delete("/{doc_id}/permanent", status_code=204)
@@ -330,6 +348,8 @@ def get_broken_links(
     auth: Optional[AuthContext] = Depends(optional_auth),
 ):
     """Check all wikilinks in a document and report which ones are broken."""
-    service = DocumentService(db)
-    _check_doc_access(service, auth, doc_id, "read")
-    return service.dep_service.get_broken_links(doc_id)
+    doc_service = DocumentService(db)
+    dep_service = DependencyService(db)
+
+    _check_doc_access(doc_service, auth, doc_id, "read")
+    return dep_service.get_broken_links(doc_id)

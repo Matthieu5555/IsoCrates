@@ -1,10 +1,10 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Plus, FileText, Folder, FolderOpen, Layers, RefreshCw, Clock, Loader2, CheckCircle2, XCircle } from 'lucide-react';
-import { getTree, getTrash, deleteDocument, createDocument, moveFolder, moveDocument, createFolderMetadata, deleteFolder, type CreateDocumentData, type CreateFolderMetadataData } from '@/lib/api/documents';
-import { fetchApi, getApiErrorMessage } from '@/lib/api/client';
+import { deleteDocument, createDocument, createFolderMetadata, deleteFolder, type CreateDocumentData, type CreateFolderMetadataData } from '@/lib/api/documents';
+import { getApiErrorMessage } from '@/lib/api/client';
 import type { TreeNode } from '@/types';
 import { ContextMenu } from './ContextMenu';
 import { NewDocumentDialog } from './dialogs/NewDocumentDialog';
@@ -17,14 +17,49 @@ import { executeBatch } from '@/lib/api/documents';
 import { buttonVariants, iconVariants, overlayVariants } from '@/lib/styles/button-variants';
 import { toast } from '@/lib/notifications/toast';
 import { useUIStore } from '@/lib/store/uiStore';
+import { useTreeData } from '@/hooks/useTreeData';
+import { useTreeDragDrop } from '@/hooks/useTreeDragDrop';
+import { useTreeSelection } from '@/hooks/useTreeSelection';
+import { INDENT_PER_LEVEL, NODE_BASE_PADDING } from '@/lib/config/tree-constants';
 
 export function DocumentTree() {
   const router = useRouter();
-  const [tree, setTree] = useState<TreeNode[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
 
+  // --- Extracted hooks ---
+  const {
+    tree,
+    loading,
+    error,
+    expandedNodes,
+    generationStatus,
+    loadTree,
+    toggleNode,
+    setExpandedNodes,
+  } = useTreeData();
+
+  const {
+    draggedNode,
+    dropTargetId,
+    rootDropActive,
+    movingFolder,
+    handleDragStart,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop,
+    handleDragEnd,
+    handleRootDragOver,
+    handleRootDragLeave,
+    handleRootDrop,
+  } = useTreeDragDrop({ onTreeChanged: loadTree, setExpandedNodes });
+
+  const {
+    selectedIds,
+    setSelectedIds,
+    handleSelect,
+    clearSelection,
+  } = useTreeSelection();
+
+  // --- Local dialog/context-menu state ---
   const [contextMenu, setContextMenu] = useState<{
     x: number; y: number; node: TreeNode;
   } | null>(null);
@@ -35,98 +70,15 @@ export function DocumentTree() {
   const [deleteFolderDialogOpen, setDeleteFolderDialogOpen] = useState(false);
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
   const [defaultPath, setDefaultPath] = useState('');
-  const [draggedNode, setDraggedNode] = useState<TreeNode | null>(null);
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
-  const [rootDropActive, setRootDropActive] = useState(false);
-  const [movingFolder, setMovingFolder] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
 
-  // Generation job status per crate (keyed by crate path)
-  const [generationStatus, setGenerationStatus] = useState<Record<string, {
-    status: string;
-    completed_at?: string;
-  }>>({});
-
-  useEffect(() => {
-    loadTree();
-  }, []);
-
-  async function loadTree() {
-    try {
-      setLoading(true);
-      const data = await getTree();
-      setTree(data);
-      const firstLevel = new Set(data.map(node => node.id));
-      setExpandedNodes(firstLevel);
-
-      // Fetch generation status for crate nodes
-      fetchGenerationStatus(data);
-
-      // Fetch trash count for floating indicator
-      getTrash().then(items => useUIStore.getState().setTrashCount(items.length)).catch(() => {});
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load tree';
-      setError(message);
-      toast.error('Failed to load tree', message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function fetchGenerationStatus(nodes: TreeNode[]) {
-    // Find crate-level nodes and fetch their latest generation job
-    try {
-      const jobs = await fetchApi<Array<{
-        id: string;
-        repo_url: string;
-        status: string;
-        completed_at?: string;
-      }>>('/api/jobs?limit=50');
-
-      const statusMap: Record<string, { status: string; completed_at?: string }> = {};
-      for (const job of jobs) {
-        // Map job to crate by matching repo_url in the tree
-        // Use the first (most recent) job per repo_url
-        if (!statusMap[job.repo_url]) {
-          statusMap[job.repo_url] = {
-            status: job.status,
-            completed_at: job.completed_at,
-          };
-        }
-      }
-      setGenerationStatus(statusMap);
-    } catch {
-      // Generation jobs endpoint may not exist yet — ignore silently
-    }
-  }
-
-  function toggleNode(nodeId: string) {
-    setExpandedNodes(prev => {
-      const next = new Set(prev);
-      if (next.has(nodeId)) next.delete(nodeId);
-      else next.add(nodeId);
-      return next;
-    });
-  }
+  // --- Event handlers ---
 
   function handleNodeClick(node: TreeNode, e?: React.MouseEvent) {
-    // Ctrl/Cmd+click toggles selection for documents
-    if (e && (e.ctrlKey || e.metaKey) && node.type === 'document') {
-      setSelectedIds(prev => {
-        const next = new Set(prev);
-        if (next.has(node.id)) next.delete(node.id);
-        else next.add(node.id);
-        return next;
-      });
-      return;
-    }
+    const result = handleSelect(node, e);
+    if (result === 'selected') return;
 
     if (node.type === 'document') {
-      if (selectedIds.size > 0) {
-        // If there's an active selection, clear it on plain click
-        setSelectedIds(new Set());
-      }
       router.push(`/docs/${node.id}`);
     } else {
       toggleNode(node.id);
@@ -245,165 +197,7 @@ export function DocumentTree() {
     }
   }
 
-  // --- Drag and drop ---
-
-  function validateDrop(dragged: TreeNode, target: TreeNode): { valid: boolean; reason?: string } {
-    if (dragged.id === target.id) {
-      return { valid: false, reason: "Can't drop on itself" };
-    }
-    if (target.type !== 'folder') {
-      return { valid: false, reason: 'Can only drop into folders' };
-    }
-    if (isAncestor(dragged, target)) {
-      return { valid: false, reason: "Can't drop folder into its subfolder" };
-    }
-    return { valid: true };
-  }
-
-  function isAncestor(potentialParent: TreeNode, node: TreeNode): boolean {
-    if (!potentialParent.children) return false;
-    for (const child of potentialParent.children) {
-      if (child.id === node.id) return true;
-      if (isAncestor(child, node)) return true;
-    }
-    return false;
-  }
-
-  function handleDragStart(e: React.DragEvent, node: TreeNode) {
-    setDraggedNode(node);
-    e.dataTransfer.effectAllowed = 'move';
-  }
-
-  function handleDragOver(e: React.DragEvent, node: TreeNode) {
-    if (!draggedNode) return;
-    const validation = validateDrop(draggedNode, node);
-    if (validation.valid) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      setDropTargetId(node.id);
-      setRootDropActive(false);
-    } else {
-      e.dataTransfer.dropEffect = 'none';
-    }
-  }
-
-  function handleDragLeave() {
-    setDropTargetId(null);
-  }
-
-  // Root-level drop zone: dropping on the tree background moves to root
-  function handleRootDragOver(e: React.DragEvent) {
-    if (!draggedNode) return;
-    // Only activate if not hovering over a specific node
-    if (dropTargetId) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    setRootDropActive(true);
-  }
-
-  function handleRootDragLeave(e: React.DragEvent) {
-    // Only deactivate if leaving the container entirely
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const { clientX, clientY } = e;
-    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
-      setRootDropActive(false);
-    }
-  }
-
-  async function handleRootDrop(e: React.DragEvent) {
-    e.preventDefault();
-    setRootDropActive(false);
-    setDropTargetId(null);
-
-    if (!draggedNode) return;
-
-    const sourcePath = draggedNode.path || '';
-    const itemName = sourcePath.split('/').filter(p => p).pop() || draggedNode.name;
-
-    // Already at root level
-    if (!sourcePath.includes('/') && draggedNode.type === 'folder') {
-      setDraggedNode(null);
-      return;
-    }
-
-    setMovingFolder(true);
-    try {
-      if (draggedNode.type === 'document') {
-        // Move document to root (empty path means top-level)
-        await moveDocument(draggedNode.id, '');
-        toast.success('Moved', `Document moved to root`);
-      } else {
-        // Move folder to root level — target path is just the folder name
-        await moveFolder(sourcePath, itemName);
-        toast.success('Moved', `Folder moved to root`);
-      }
-      await loadTree();
-    } catch (err) {
-      toast.error('Move failed', getApiErrorMessage(err));
-    } finally {
-      setMovingFolder(false);
-      setDraggedNode(null);
-    }
-  }
-
-  async function handleDrop(e: React.DragEvent, targetNode: TreeNode) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDropTargetId(null);
-    setRootDropActive(false);
-
-    if (!draggedNode) return;
-
-    const validation = validateDrop(draggedNode, targetNode);
-    if (!validation.valid) {
-      toast.warning('Cannot drop here', validation.reason || 'Invalid drop target');
-      setDraggedNode(null);
-      return;
-    }
-
-    setMovingFolder(true);
-    try {
-      if (draggedNode.type === 'document') {
-        // Move document into target folder
-        const targetPath = targetNode.path || '';
-        await moveDocument(draggedNode.id, targetPath);
-        toast.success('Moved', 'Document moved');
-      } else {
-        // Move folder into target folder
-        const sourcePath = draggedNode.path || '';
-        const folderName = sourcePath.split('/').filter(p => p).pop() || draggedNode.name;
-        const targetPath = targetNode.path
-          ? `${targetNode.path}/${folderName}`
-          : folderName;
-
-        if (sourcePath === targetPath) {
-          setDraggedNode(null);
-          setMovingFolder(false);
-          return;
-        }
-
-        const result = await moveFolder(sourcePath, targetPath);
-        toast.success('Moved', `${result.affected_documents} document(s) updated`);
-      }
-
-      await loadTree();
-
-      if (targetNode.type === 'folder') {
-        setExpandedNodes(prev => new Set([...Array.from(prev), targetNode.id]));
-      }
-    } catch (err) {
-      toast.error('Move failed', getApiErrorMessage(err));
-    } finally {
-      setMovingFolder(false);
-      setDraggedNode(null);
-    }
-  }
-
-  function handleDragEnd() {
-    setDraggedNode(null);
-    setDropTargetId(null);
-    setRootDropActive(false);
-  }
+  // --- Helpers ---
 
   function getNodeTooltip(node: TreeNode): string {
     const parts: string[] = [];
@@ -415,10 +209,12 @@ export function DocumentTree() {
     return parts.join(' \u2022 ');
   }
 
+  // --- Render ---
+
   function renderNode(node: TreeNode, level = 0) {
     const isExpanded = expandedNodes.has(node.id);
     const hasChildren = node.children && node.children.length > 0;
-    const indent = level * 16;
+    const indent = level * INDENT_PER_LEVEL;
     const isDropTarget = dropTargetId === node.id;
     const isSelected = selectedIds.has(node.id);
     const tooltip = getNodeTooltip(node);
@@ -439,7 +235,7 @@ export function DocumentTree() {
             className={`w-full text-left px-3 py-2 hover:bg-muted rounded text-sm flex items-center gap-2 transition-colors ${
               isDropTarget ? overlayVariants.dropTarget : ''
             } ${isSelected ? 'bg-primary/10 ring-1 ring-primary/30' : ''} cursor-grab active:cursor-grabbing`}
-            style={{ paddingLeft: `${indent + 12}px` }}
+            style={{ paddingLeft: `${indent + NODE_BASE_PADDING}px` }}
           >
             {hasChildren && (
               <span className="text-xs w-3">
@@ -493,7 +289,10 @@ export function DocumentTree() {
                 );
               }
               if (jobStatus.status === 'failed') {
-                return <span title="Generation failed"><XCircle className="h-3 w-3 text-red-500" /></span>;
+                const errorDetail = jobStatus.error_message
+                  ? `Generation failed:\n${jobStatus.error_message}`
+                  : 'Generation failed (no error details available)';
+                return <span title={errorDetail}><XCircle className="h-3 w-3 text-red-500" /></span>;
               }
               return null;
             })()}
@@ -501,7 +300,7 @@ export function DocumentTree() {
           {node.type === 'folder' && node.description && (
             <div
               className="text-xs text-muted-foreground px-3 pb-1 italic"
-              style={{ paddingLeft: `${indent + 12 + 24}px` }}
+              style={{ paddingLeft: `${indent + NODE_BASE_PADDING + 24}px` }}
             >
               {node.description}
             </div>
@@ -647,7 +446,7 @@ export function DocumentTree() {
 
       <BulkActionBar
         selectedIds={selectedIds}
-        onClearSelection={() => setSelectedIds(new Set())}
+        onClearSelection={clearSelection}
         onComplete={loadTree}
         onPickFolder={() => setFolderPickerOpen(true)}
       />
@@ -664,7 +463,7 @@ export function DocumentTree() {
             if (result.failed > 0) {
               toast.warning('Partial failure', `${result.failed} document(s) failed`);
             }
-            setSelectedIds(new Set());
+            clearSelection();
             await loadTree();
           } catch {
             toast.error('Batch move failed', 'An unexpected error occurred');

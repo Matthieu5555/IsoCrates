@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 
 class DependencyBase(BaseModel):
@@ -26,3 +26,16 @@ class DependencyResponse(DependencyBase):
 
     class Config:
         from_attributes = True
+
+
+class DocumentDependencies(BaseModel):
+    """Outgoing and incoming dependencies for a document."""
+    outgoing: List[DependencyResponse]
+    incoming: List[DependencyResponse]
+
+
+class BrokenLinkInfo(BaseModel):
+    """Wikilink resolution status for a single link target."""
+    target: str
+    resolved: bool
+    resolved_doc_id: Optional[str] = None

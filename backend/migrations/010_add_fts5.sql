@@ -1,4 +1,5 @@
--- Migration 006: Add FTS5 full-text search
+-- dialect: sqlite
+-- Migration 010: Add FTS5 full-text search (SQLite only)
 -- Creates a virtual table backed by the documents table for fast text search.
 -- Triggers keep the FTS index in sync on INSERT/UPDATE/DELETE.
 -- Only indexes active (non-deleted) documents.

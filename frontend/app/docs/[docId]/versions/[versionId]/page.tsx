@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 import { getVersion } from '@/lib/api/documents';
 import Link from 'next/link';
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer';

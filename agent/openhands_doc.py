@@ -18,30 +18,64 @@ Architecture:
 
 Usage:
     python openhands_doc.py --repo https://github.com/user/repo
-    python openhands_doc.py --repo https://github.com/user/repo --collection backend/
+    python openhands_doc.py --repo https://github.com/user/repo --crate backend/
 """
 
+import hashlib
 import json
+import logging
 import os
 import re
 import sys
 import argparse
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
+from typing import Any
+
 from dotenv import load_dotenv
+
+logger = logging.getLogger("isocrates.agent")
 
 # OpenHands SDK imports
 from openhands.sdk import LLM, Agent, Conversation, Tool
 from openhands.sdk.llm import Message, TextContent
+from openhands.sdk.context.condenser import LLMSummarizingCondenser
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.task_tracker import TaskTrackerTool
 from openhands.tools.terminal import TerminalTool
 
+# Static repo analysis
+from repo_analysis import ModuleInfo, RepoAnalysis, analyze_repository
+
+# Document lifecycle (discovery, snapshot, cleanup)
+from document_lifecycle import DocumentLifecycle, get_current_commit_sha
+
+# Scout orchestration
+from scout import ScoutRunner, ScoutResult
+
+# Planner (Tier 1)
+from planner import DocumentPlanner, get_relevant_reports, sanitize_wikilinks
+
+# Prompt templates, taxonomy, and pipeline constants
+from prompts import (
+    COMPLEXITY_ORDER,
+    DOCUMENT_TYPES,
+    EXISTING_SUMMARY_TRUNCATION,
+    FILE_HASH_LENGTH,
+    PLANNER_OUTPUT_CAP,
+    SCOUT_CONDENSER_DIVISOR,
+    WRITER_CONDENSER_DIVISOR,
+    PROSE_REQUIREMENTS,
+    TABLE_REQUIREMENTS,
+    DIAGRAM_REQUIREMENTS,
+    WIKILINK_REQUIREMENTS,
+)
+
 # Document registry for ID-based tracking
 from doc_registry import (
     generate_doc_id,
-    find_document_by_id,
     create_document_with_metadata,
     DocumentRegistry,
     parse_frontmatter,
@@ -56,6 +90,13 @@ from version_priority import VersionPriorityEngine
 
 # Security modules
 from security import RepositoryValidator, PathValidator
+
+# Model constraint resolution
+from model_config import resolve_model_config
+
+# Prevent interactive pagers from trapping agents in git commands
+os.environ.setdefault("GIT_PAGER", "cat")
+os.environ.setdefault("PAGER", "cat")
 
 # ---------------------------------------------------------------------------
 # Model Configuration
@@ -90,272 +131,7 @@ def _llm_kwargs(tier: str) -> dict:
         kwargs["api_key"] = api_key
     return kwargs
 
-# ---------------------------------------------------------------------------
-# Document Type Taxonomy (used for fallback and keyword tagging only —
-# the planner is free to create any page structure it wants)
-# ---------------------------------------------------------------------------
-DOCUMENT_TYPES = {
-    "quickstart": {"title": "Quick Start", "keywords": ["Getting Started", "Installation"]},
-    "overview": {"title": "Overview", "keywords": ["Overview", "Introduction"]},
-    "architecture": {"title": "Architecture", "keywords": ["Architecture", "Design"]},
-    "api": {"title": "API", "keywords": ["API", "Reference", "Endpoints"]},
-    "guide": {"title": "Guide", "keywords": ["Guide", "How-To"]},
-    "config": {"title": "Configuration", "keywords": ["Configuration", "Deployment"]},
-    "component": {"title": "Component", "keywords": ["Component", "Module"]},
-    "data-model": {"title": "Data Model", "keywords": ["Data", "Schema", "Model"]},
-    "contributing": {"title": "Contributing", "keywords": ["Contributing", "Development"]},
-    "capabilities": {"title": "Capabilities & User Stories", "keywords": ["Capabilities", "User Stories", "Features", "Use Cases"]},
-}
 
-COMPLEXITY_ORDER = {"small": 0, "medium": 1, "large": 2}
-
-# ---------------------------------------------------------------------------
-# Shared Prompt Components
-# ---------------------------------------------------------------------------
-
-PROSE_REQUIREMENTS = """
-WRITING STYLE (ABSOLUTELY MANDATORY):
-
-Write professional, concise technical documentation. Each page should be
-SHORT — 1-2 printed pages maximum. Think wiki page, not book chapter.
-
-Use flowing prose paragraphs of 2-4 sentences. Use transition words to
-connect ideas. NEVER use bullet points or dashes for descriptions — weave
-items into sentences. Code blocks and tables are acceptable but surround
-them with brief explanatory prose.
-
-If a topic is too large for 1-2 pages, split it into sub-pages and link
-to them with [[wikilinks]]. Prefer many small focused pages over few
-large ones.
-"""
-
-TABLE_REQUIREMENTS = """
-GFM TABLES (use when they aid comprehension):
-
-Use GitHub-Flavored Markdown tables for structured data: endpoint summaries,
-config options, comparison matrices, dependency lists, component tables.
-Every table needs a header row and separator (|---|---|).
-Not every page needs a table — use them where they genuinely help.
-"""
-
-DIAGRAM_REQUIREMENTS = """
-MERMAID DIAGRAMS (use where visual relationships matter):
-
-Use ```mermaid code blocks. Choose the right type:
-  graph TB/TD: for architecture, component relationships
-  sequenceDiagram: for request flows, data pipelines
-  stateDiagram-v2: for stateful entities
-  erDiagram: for data models
-
-Include a brief caption sentence. Not every page needs a diagram — use
-them on architecture, flow, and data model pages where they genuinely
-clarify relationships.
-"""
-
-WIKILINK_REQUIREMENTS = """
-WIKILINKS (THIS IS THE MOST IMPORTANT REQUIREMENT):
-
-Use [[Page Title]] syntax to build a densely interconnected knowledge graph.
-Wikilinks are what make this feel like a human-crafted wiki, not AI output.
-
-INLINE WIKILINKS — EMBEDDED NATURALLY IN PROSE (this is the primary form):
-  Weave links into sentences where a reader would naturally want to drill
-  deeper. Examples of GOOD inline wikilinks:
-    "The [[Document Service]] validates input before delegating to the
-     [[Document Repository]] for persistence."
-    "Authentication is handled via JWT tokens, as described in
-     [[Authentication Flow]], and configured through [[Environment Variables]]."
-    "This component follows the [[Repository Pattern]], abstracting all
-     database queries behind a clean interface."
-
-  BAD wikilinks (don't do this):
-    "See [[Architecture]] for more." — lazy, tells the reader nothing
-    "Related: [[X]], [[Y]], [[Z]]" — dumping links without context
-
-  The key test: would a human editor naturally hyperlink this word?
-  If the reader would think "what's that?" or "tell me more", it's a link.
-
-RULES:
-  - Link significant nouns the FIRST time they appear in each section
-  - Every service, component, pattern, technology, and config concept
-    that has its own page should be wikilinked where it's mentioned
-  - DON'T over-link: same word linked twice in one paragraph is too much
-  - DON'T dump links: a list of bare [[links]] with no prose is useless
-
-DO NOT ADD A "SEE ALSO" SECTION. EVER.
-  No "## See Also", no "Related pages", no link dump at the bottom.
-  Every wikilink must be INLINE in prose where it's contextually relevant.
-  If a connection matters, it belongs in a sentence. If it doesn't fit
-  naturally in a sentence, it's not a real connection — don't force it.
-  The dependency graph must reflect genuine relationships, not padding.
-"""
-
-
-# ---------------------------------------------------------------------------
-# Scout Definitions
-# ---------------------------------------------------------------------------
-
-SCOUT_DEFINITIONS = {
-    "structure": {
-        "name": "Structure & Overview",
-        "always_run": True,
-        "prompt": """You are a repository scout. Your mission: explore the repository at {repo_path} and produce a structured intelligence report about its overall structure.
-
-DO THIS:
-1. Run: ls -la
-2. Run: find . -type f -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.go' -o -name '*.rs' -o -name '*.java' -o -name '*.rb' -o -name '*.php' | head -100
-3. Run: find . -type f | wc -l
-4. Read README.md (or README.rst, README.txt) if it exists
-5. Read package metadata files: package.json, pyproject.toml, Cargo.toml, go.mod, pom.xml, Gemfile, etc.
-6. Run: find . -maxdepth 2 -type d | head -50
-
-Write your report to /tmp/scout_report_structure.md with this format:
-
-## Scout Report: Structure & Overview
-### Key Findings
-- Project name and description (from README/package files)
-- Primary language(s) and framework(s) detected
-- Total file count and source file count
-- High-level directory layout (what each top-level dir contains)
-- Build system / package manager used
-- License
-
-### Raw Data
-- Directory tree (top 2 levels)
-- Package metadata summary
-- README summary (first ~500 chars)
-
-Be thorough but concise. Facts only, no opinions.""",
-    },
-    "architecture": {
-        "name": "Architecture & Code",
-        "always_run": True,
-        "prompt": """You are a repository scout. Your mission: explore the repository at {repo_path} and produce a structured intelligence report about its architecture and code organization.
-
-DO THIS:
-1. Identify entry points: main.py, app.py, index.ts, main.go, etc.
-2. Read the main entry point(s) and trace key imports
-3. Identify the layered architecture: routes/controllers, services/business logic, models/data, utilities
-4. Look for design patterns: MVC, repository pattern, dependency injection, middleware chains, etc.
-5. Read 3-5 core source files to understand the main abstractions
-6. Check for shared types, interfaces, or base classes
-
-Write your report to /tmp/scout_report_architecture.md with this format:
-
-## Scout Report: Architecture & Code
-### Key Findings
-- Entry point(s) and how the application starts
-- Module/package organization (layers, domains)
-- Core abstractions: key classes, functions, interfaces
-- Design patterns identified
-- Dependency flow (what depends on what)
-- Database / storage approach (if any)
-
-### Raw Data
-- Import graph summary (main entry → what it imports)
-- Key file list with one-line descriptions
-- Notable code patterns with file references
-
-Be thorough but concise. Facts only, no opinions.""",
-    },
-    "api": {
-        "name": "API & Interfaces",
-        "always_run": True,
-        "prompt": """You are a repository scout. Your mission: explore the repository at {repo_path} and produce a structured intelligence report about its APIs and public interfaces.
-
-DO THIS:
-1. Search for API route definitions: grep -r "app.get\|app.post\|@router\|@app.route\|router.get\|router.post\|@GetMapping\|@PostMapping\|HandleFunc" --include="*.py" --include="*.ts" --include="*.js" --include="*.go" --include="*.java" .
-2. Search for schema/model definitions: grep -r "class.*Model\|class.*Schema\|interface \|type .*=\|struct " --include="*.py" --include="*.ts" --include="*.js" --include="*.go" . | head -50
-3. Read API route files to understand endpoint signatures
-4. Look for OpenAPI/Swagger specs, GraphQL schemas, or protobuf definitions
-5. Check for authentication/authorization middleware
-6. Look for request/response models or DTOs
-
-Write your report to /tmp/scout_report_api.md with this format:
-
-## Scout Report: API & Interfaces
-### Key Findings
-- API style (REST, GraphQL, gRPC, CLI, library)
-- Authentication mechanism (JWT, API key, OAuth, none)
-- Number of endpoints/routes found
-- Key request/response models
-- Error handling approach
-- API versioning (if any)
-
-### Raw Data
-- Endpoint table: Method | Path | Handler | Auth Required
-- Schema/model list with field summaries
-- Middleware chain (if applicable)
-
-If the project has no API (e.g., it's a library or CLI tool), document the public interface instead: exported functions, classes, CLI commands.
-
-Be thorough but concise. Facts only, no opinions.""",
-    },
-    "infra": {
-        "name": "Infrastructure & Config",
-        "always_run": False,  # only for large repos
-        "prompt": """You are a repository scout. Your mission: explore the repository at {repo_path} and produce a structured intelligence report about its infrastructure and configuration.
-
-DO THIS:
-1. Read Dockerfile(s) if present
-2. Read docker-compose.yml / docker-compose.yaml if present
-3. Look for CI/CD configs: .github/workflows/, .gitlab-ci.yml, Jenkinsfile, .circleci/
-4. Read .env.example or .env.template if present
-5. Look for deployment configs: Kubernetes manifests, Terraform, serverless.yml, Procfile
-6. Check for configuration files: config/, settings.py, .eslintrc, tsconfig.json, etc.
-7. Look for Makefile or task runner configs
-
-Write your report to /tmp/scout_report_infra.md with this format:
-
-## Scout Report: Infrastructure & Config
-### Key Findings
-- Containerization approach (Docker details)
-- CI/CD pipeline description
-- Environment variables required (from .env.example or code)
-- Deployment strategy
-- External service dependencies (databases, caches, message queues)
-- Configuration management approach
-
-### Raw Data
-- Dockerfile summary (base image, stages, exposed ports)
-- docker-compose services table: Service | Image | Ports | Dependencies
-- CI/CD pipeline steps
-- Environment variable table: Variable | Purpose | Required | Default
-
-Be thorough but concise. Facts only, no opinions.""",
-    },
-    "tests": {
-        "name": "Tests & Quality",
-        "always_run": False,  # only for large repos
-        "prompt": """You are a repository scout. Your mission: explore the repository at {repo_path} and produce a structured intelligence report about its testing and quality setup.
-
-DO THIS:
-1. Find test directories: find . -type d -name "test*" -o -name "__tests__" -o -name "spec*" | head -20
-2. Count test files: find . -name "test_*" -o -name "*_test.*" -o -name "*.test.*" -o -name "*.spec.*" | wc -l
-3. Read 2-3 test files to understand patterns
-4. Look for test configuration: pytest.ini, jest.config.*, .mocharc.*, conftest.py
-5. Check for linting/formatting configs: .eslintrc, .prettierrc, .flake8, ruff.toml, pyproject.toml [tool.ruff]
-6. Look for type checking: mypy.ini, tsconfig.json strict mode
-
-Write your report to /tmp/scout_report_tests.md with this format:
-
-## Scout Report: Tests & Quality
-### Key Findings
-- Test framework(s) used
-- Test file count and organization
-- Testing patterns (unit, integration, e2e)
-- Fixtures/factories approach
-- Code quality tools (linters, formatters, type checkers)
-- Coverage configuration (if any)
-
-### Raw Data
-- Test directory structure
-- Sample test patterns (describe how tests are structured)
-- Quality tool configuration summary
-
-Be thorough but concise. Facts only, no opinions.""",
-    },
-}
 
 
 # ---------------------------------------------------------------------------
@@ -402,14 +178,14 @@ class OpenHandsDocGenerator:
     Tier 2 (Writers):  Write each document from planner briefs.
     """
 
-    def __init__(self, repo_path: Path, repo_url: str, collection: str = ""):
+    def __init__(self, repo_path: Path, repo_url: str, crate: str = ""):
         self.repo_path = repo_path.resolve()
         self.repo_url = repo_url
         self.repo_name = repo_path.name
-        self.collection = (
-            collection + "/"
-            if collection and not collection.endswith("/")
-            else collection
+        self.crate = (
+            crate + "/"
+            if crate and not crate.endswith("/")
+            else crate
         )
 
         # Configurable output directory
@@ -419,6 +195,14 @@ class OpenHandsDocGenerator:
         # Registry & API client
         self.registry = DocumentRegistry()
         self.api_client = DocumentAPIClient()
+
+        # Document lifecycle (discovery, snapshot, cleanup)
+        self.lifecycle = DocumentLifecycle(
+            api_client=self.api_client,
+            repo_url=self.repo_url,
+            repo_path=self.repo_path,
+            crate=self.crate,
+        )
 
         # Load environment
         load_dotenv()
@@ -436,13 +220,29 @@ class OpenHandsDocGenerator:
                 "Set them in .env or as environment variables. See .env.example."
             )
 
+        # ---- Resolve model constraints --------------------------------------
+        self._scout_config = resolve_model_config(SCOUT_MODEL)
+        self._planner_config = resolve_model_config(PLANNER_MODEL)
+        self._writer_config = resolve_model_config(WRITER_MODEL)
+
         # ---- Tier 0: Scout Agent -------------------------------------------
         scout_kwargs = _llm_kwargs("SCOUT")
         self.scout_llm = LLM(
             model=SCOUT_MODEL,
             native_tool_calling=LLM_NATIVE_TOOL_CALLING,
             timeout=900,
+            max_output_tokens=self._scout_config.max_output_tokens,
+            litellm_extra_body=self._scout_config.extra_body or {},
+            **self._scout_config.extra_llm_kwargs,
             **scout_kwargs,
+        )
+        # Condenser max_size derived from context window:
+        # larger context → more events before condensing
+        scout_condenser_size = max(20, self._scout_config.context_window // SCOUT_CONDENSER_DIVISOR)
+        scout_condenser = LLMSummarizingCondenser(
+            llm=self.scout_llm,
+            max_size=scout_condenser_size,
+            keep_first=2,
         )
         self.scout_agent = Agent(
             llm=self.scout_llm,
@@ -450,13 +250,18 @@ class OpenHandsDocGenerator:
                 Tool(name=TerminalTool.name),
                 Tool(name=FileEditorTool.name),
             ],
+            condenser=scout_condenser,
         )
 
         # ---- Tier 1: Planner LLM (direct completion, no tools) ------------
+        # Planner output cap: use model limit but cap at 16K (plans don't need more)
+        planner_output = min(self._planner_config.max_output_tokens, PLANNER_OUTPUT_CAP)
         self.planner_llm = LLM(
             model=PLANNER_MODEL,
             timeout=900,
-            max_output_tokens=16384,
+            max_output_tokens=planner_output,
+            litellm_extra_body=self._planner_config.extra_body or {},
+            **self._planner_config.extra_llm_kwargs,
             **_llm_kwargs("PLANNER"),
         )
 
@@ -466,7 +271,16 @@ class OpenHandsDocGenerator:
             model=WRITER_MODEL,
             native_tool_calling=LLM_NATIVE_TOOL_CALLING,
             timeout=900,
+            max_output_tokens=self._writer_config.max_output_tokens,
+            litellm_extra_body=self._writer_config.extra_body or {},
+            **self._writer_config.extra_llm_kwargs,
             **writer_kwargs,
+        )
+        writer_condenser_size = max(20, self._writer_config.context_window // WRITER_CONDENSER_DIVISOR)
+        writer_condenser = LLMSummarizingCondenser(
+            llm=self.writer_llm,
+            max_size=writer_condenser_size,
+            keep_first=2,
         )
         self.writer_agent = Agent(
             llm=self.writer_llm,
@@ -475,12 +289,37 @@ class OpenHandsDocGenerator:
                 Tool(name=FileEditorTool.name),
                 Tool(name=TaskTrackerTool.name),
             ],
+            condenser=writer_condenser,
+        )
+
+        # Scout runner
+        self.scout_runner = ScoutRunner(
+            scout_agent=self.scout_agent,
+            planner_llm=self.planner_llm,
+            repo_path=self.repo_path,
+            crate=self.crate,
+            scout_context_window=self._scout_config.context_window,
+            conversation_cls=Conversation,
+            message_cls=Message,
+            text_content_cls=TextContent,
+        )
+
+        # Planner
+        self.planner = DocumentPlanner(
+            planner_llm=self.planner_llm,
+            repo_name=self.repo_name,
+            crate=self.crate,
+            notes_dir=self.notes_dir,
+            message_cls=Message,
+            text_content_cls=TextContent,
+            get_repo_metrics=lambda: ScoutRunner._estimate_repo(self.repo_path, self.crate),
         )
 
         print("[Agent] Three-Tier Documentation Generator Configured:")
-        print(f"   Scout:   {SCOUT_MODEL} @ {scout_kwargs.get('base_url')}")
-        print(f"   Planner: {PLANNER_MODEL} @ {_llm_kwargs('PLANNER').get('base_url')}")
-        print(f"   Writer:  {WRITER_MODEL} @ {writer_kwargs.get('base_url')}")
+        print(f"   Scout:   {SCOUT_MODEL} ({self._scout_config})")
+        print(f"   Planner: {PLANNER_MODEL} ({self._planner_config})")
+        print(f"   Writer:  {WRITER_MODEL} ({self._writer_config})")
+        print(f"   Condenser: scout={scout_condenser_size}, writer={writer_condenser_size}")
         print(f"   Native tool calling: {LLM_NATIVE_TOOL_CALLING}")
         print(f"   Workspace: {self.repo_path}")
         print(f"   Output:    {self.notes_dir}")
@@ -489,666 +328,63 @@ class OpenHandsDocGenerator:
     # Discovery
     # ------------------------------------------------------------------
 
-    def _discover_existing_documents(self) -> dict:
-        """Query the API for existing documents (for cross-referencing)."""
-        try:
-            all_docs = self.api_client.get_all_documents()
-            related_docs = [
-                doc
-                for doc in all_docs
-                if doc.get("collection", "").rstrip("/")
-                == self.collection.rstrip("/")
-            ] if self.collection else []
-            return {
-                "all_docs": all_docs,
-                "related_docs": related_docs,
-                "count": len(all_docs),
-                "related_count": len(related_docs),
-            }
-        except Exception as e:
-            print(f"[Warning] Could not discover existing documents: {e}")
-            return {
-                "all_docs": [],
-                "related_docs": [],
-                "count": 0,
-                "related_count": 0,
-            }
+    def _discover_existing_documents(self) -> dict[str, dict[str, Any]]:
+        """Delegate to lifecycle.discover()."""
+        return self.lifecycle.discover()
 
-    def _build_document_context(self, discovery: dict) -> str:
-        """Format existing documents for inclusion in prompts."""
-        from security import PromptInjectionDetector
-        from collections import defaultdict
-
-        if discovery["count"] == 0:
-            return "\n**DOCUMENTATION ECOSYSTEM:** This is the first document in the system.\n"
-
-        detector = PromptInjectionDetector()
-        context = f"\n**DOCUMENTATION ECOSYSTEM:** {discovery['count']} existing documents.\n\n"
-        context += "**Available documents for cross-referencing:**\n\n"
-
-        by_collection = defaultdict(list)
-        for doc in discovery["all_docs"]:
-            by_collection[doc.get("collection", "uncategorized")].append(doc)
-
-        for coll, docs in sorted(by_collection.items()):
-            if coll:
-                context += f"Collection: {detector.sanitize_filename(coll)}\n"
-            for doc in docs[:10]:
-                title = doc.get("title", doc.get("repo_name", "Unknown"))
-                safe = detector.sanitize_filename(title)
-                dtype = doc.get("doc_type", "unknown")
-                context += f"  - [[{safe}]] ({dtype})\n"
-            if len(docs) > 10:
-                context += f"  ... and {len(docs) - 10} more\n"
-            context += "\n"
-        return context
+    def _build_document_context(self, discovery: dict[str, dict[str, Any]]) -> str:
+        """Delegate to lifecycle.build_context()."""
+        return self.lifecycle.build_context(discovery)
 
     # ------------------------------------------------------------------
     # Regeneration context
     # ------------------------------------------------------------------
 
     def _get_regeneration_context(self) -> dict | None:
-        """
-        Check if documentation already exists for this repo. If so, fetch
-        full content of each doc and the commit SHA they were generated from.
-
-        Returns None if no existing docs (first-time generation), or a dict:
-          {
-            "last_commit_sha": str,
-            "existing_docs": [{"title": ..., "doc_type": ..., "content": ...}, ...],
-            "git_diff": str,       # diff since last generation
-            "git_log": str,        # commit log since last generation
-          }
-        """
-        existing_list = self.api_client.get_documents_by_repo(self.repo_url)
-        if not existing_list:
-            return None
-
-        print(f"[Regen] Found {len(existing_list)} existing doc(s) for this repo")
-
-        # Fetch full content for each doc
-        existing_docs = []
-        last_commit_sha = None
-        for doc_summary in existing_list:
-            doc_id = doc_summary.get("id")
-            if not doc_id:
-                continue
-            full_doc = self.api_client.get_document(doc_id)
-            if not full_doc:
-                continue
-            existing_docs.append({
-                "title": full_doc.get("title", ""),
-                "doc_type": full_doc.get("doc_type", ""),
-                "content": full_doc.get("content", ""),
-            })
-
-            # Get the commit SHA from version history
-            if not last_commit_sha:
-                versions = self.api_client.get_document_versions(doc_id)
-                if versions:
-                    meta = versions[0].get("author_metadata", {})
-                    sha = meta.get("repo_commit_sha")
-                    if sha and sha != "unknown":
-                        last_commit_sha = sha
-
-        if not existing_docs:
-            return None
-
-        # Get git diff and log since last generation
-        git_diff = ""
-        git_log = ""
-        if last_commit_sha:
-            print(f"[Regen] Last documented commit: {last_commit_sha[:8]}")
-            try:
-                diff_result = subprocess.run(
-                    ["git", "diff", "--stat", f"{last_commit_sha}..HEAD"],
-                    cwd=self.repo_path,
-                    capture_output=True, text=True, timeout=30,
-                )
-                if diff_result.returncode == 0:
-                    git_diff = diff_result.stdout
-
-                # Also get the detailed diff (capped at 10k chars)
-                detailed_diff = subprocess.run(
-                    ["git", "diff", f"{last_commit_sha}..HEAD"],
-                    cwd=self.repo_path,
-                    capture_output=True, text=True, timeout=30,
-                )
-                if detailed_diff.returncode == 0 and detailed_diff.stdout.strip():
-                    full_diff = detailed_diff.stdout
-                    if len(full_diff) > 10000:
-                        git_diff += "\n\n--- Detailed diff (truncated to 10k chars) ---\n"
-                        git_diff += full_diff[:10000] + "\n... [truncated]"
-                    else:
-                        git_diff += "\n\n--- Detailed diff ---\n" + full_diff
-
-                log_result = subprocess.run(
-                    ["git", "log", "--oneline", f"{last_commit_sha}..HEAD"],
-                    cwd=self.repo_path,
-                    capture_output=True, text=True, timeout=30,
-                )
-                if log_result.returncode == 0:
-                    git_log = log_result.stdout
-            except Exception as e:
-                print(f"[Regen] Warning: could not get git diff: {e}")
-        else:
-            print("[Regen] No commit SHA found in existing docs, will do full re-exploration")
-            return None
-
-        if not git_diff.strip() and not git_log.strip():
-            print("[Regen] No changes detected since last generation")
-            # Still return context so version_priority can decide per-doc
-            return {
-                "last_commit_sha": last_commit_sha,
-                "existing_docs": existing_docs,
-                "git_diff": "",
-                "git_log": "",
-            }
-
-        print(f"[Regen] Changes detected:")
-        print(f"   Commits since last gen: {len(git_log.strip().splitlines())}")
-        print(f"   Diff size: {len(git_diff)} chars")
-
-        return {
-            "last_commit_sha": last_commit_sha,
-            "existing_docs": existing_docs,
-            "git_diff": git_diff,
-            "git_log": git_log,
-        }
+        """Delegate to lifecycle.get_regeneration_context()."""
+        return self.lifecycle.get_regeneration_context()
 
     def _run_diff_scout(self, regen_ctx: dict) -> str:
-        """
-        Run a single diff-focused scout that analyzes WHAT CHANGED instead
-        of re-exploring the entire codebase.
-        """
-        existing_doc_summaries = ""
-        for doc in regen_ctx["existing_docs"]:
-            # Include first 2000 chars of each existing doc
-            content_snippet = doc["content"][:2000]
-            if len(doc["content"]) > 2000:
-                content_snippet += "\n... [truncated]"
-            existing_doc_summaries += f"\n### Existing: {doc['title']} ({doc['doc_type']})\n{content_snippet}\n"
-
-        diff_prompt = f"""You are a repository scout specializing in CHANGE ANALYSIS. Documentation
-already exists for this repository. Your job is to understand what has changed
-since the last documentation was generated and identify what needs updating.
-
-EXISTING DOCUMENTATION (current versions):
-{existing_doc_summaries}
-
-GIT LOG (commits since last documentation):
-{regen_ctx['git_log']}
-
-GIT DIFF (changes since last documentation):
-{regen_ctx['git_diff']}
-
-YOUR MISSION:
-1. Read the git diff carefully to understand what files changed and how
-2. For each changed file, read the NEW version to understand the current state
-3. Cross-reference changes against existing documentation to identify:
-   - Facts that are now WRONG (outdated info in docs)
-   - New features/endpoints/configs that are MISSING from docs
-   - Removed features that should be DELETED from docs
-   - Structural changes that affect architecture descriptions
-4. Check if any new files were added that introduce new concepts
-
-Write your report to /tmp/scout_report_diff.md with this format:
-
-## Scout Report: Change Analysis
-### Summary of Changes
-Brief overview of what changed in the codebase.
-
-### Impact on Documentation
-For each existing document, list what needs updating:
-
-#### [Document Title]
-- OUTDATED: [specific fact that is now wrong]
-- MISSING: [new feature/endpoint/config not in docs]
-- REMOVE: [feature that was deleted]
-- OK: [section that is still accurate]
-
-### New Files & Features
-List any new files/features that may need documentation.
-
-### Raw Data
-- Files changed: [count]
-- Commits since last gen: [count]
-- Key changed files with brief descriptions
-
-Be thorough but concise. Focus on WHAT CHANGED, not on describing the whole codebase."""
-
-        print("\n[Scout] Running diff-focused change analysis...")
-        try:
-            conversation = Conversation(
-                agent=self.scout_agent,
-                workspace=str(self.repo_path),
-            )
-            conversation.send_message(diff_prompt)
-            conversation.run()
-
-            report_path = Path("/tmp/scout_report_diff.md")
-            if report_path.exists():
-                report = report_path.read_text()
-                print(f"   [Done] Diff scout: {len(report.splitlines())} lines")
-                return report
-            else:
-                print("   [Warning] Diff scout did not produce a report")
-                return "## Scout Report: Change Analysis\n### Key Findings\nNo report produced.\n"
-        except Exception as e:
-            print(f"   [Error] Diff scout failed: {e}")
-            return f"## Scout Report: Change Analysis\n### Key Findings\nScout failed: {e}\n"
-
-    # ------------------------------------------------------------------
-    # Tier 0: Scouts
-    # ------------------------------------------------------------------
-
-    def _determine_repo_size(self) -> str:
-        """Quick heuristic to decide if we need infra/tests scouts."""
-        try:
-            result = subprocess.run(
-                ["find", ".", "-name", "*.py", "-o", "-name", "*.js",
-                 "-o", "-name", "*.ts", "-o", "-name", "*.go",
-                 "-o", "-name", "*.rs", "-o", "-name", "*.java"],
-                cwd=self.repo_path,
-                capture_output=True, text=True,
-            )
-            file_count = len([l for l in result.stdout.strip().split("\n") if l])
-        except Exception:
-            file_count = 20
-        if file_count < 10:
-            return "small"
-        elif file_count < 50:
-            return "medium"
-        return "large"
+        """Delegate to scout_runner.run_diff()."""
+        result = self.scout_runner.run_diff(regen_ctx)
+        self._apply_scout_result(result)
+        return result.combined_text
 
     def _run_scouts(self) -> str:
-        """
-        Run scout agents sequentially. Each scout explores a focused area
-        of the repository and writes a structured report to /tmp/.
+        """Delegate to scout_runner.run()."""
+        result = self.scout_runner.run()
+        self._apply_scout_result(result)
+        return result.combined_text
 
-        Returns the concatenated text of all scout reports.
-        """
-        repo_size = self._determine_repo_size()
-        print(f"\n[Scouts] Repository size heuristic: {repo_size}")
-
-        # Decide which scouts to run
-        scouts_to_run = []
-        for scout_key, scout_def in SCOUT_DEFINITIONS.items():
-            if scout_def["always_run"]:
-                scouts_to_run.append(scout_key)
-            elif repo_size == "large":
-                scouts_to_run.append(scout_key)
-
-        print(f"[Scouts] Running {len(scouts_to_run)} scouts: {', '.join(scouts_to_run)}")
-
-        reports = {}
-        for idx, scout_key in enumerate(scouts_to_run, 1):
-            scout_def = SCOUT_DEFINITIONS[scout_key]
-            report_path = Path(f"/tmp/scout_report_{scout_key}.md")
-
-            print(f"\n[Scout {idx}/{len(scouts_to_run)}] {scout_def['name']}...")
-
-            prompt = scout_def["prompt"].format(repo_path=self.repo_path)
-
-            try:
-                conversation = Conversation(
-                    agent=self.scout_agent,
-                    workspace=str(self.repo_path),
-                )
-                conversation.send_message(prompt)
-                conversation.run()
-
-                if report_path.exists():
-                    report_text = report_path.read_text()
-                    reports[scout_key] = report_text
-                    lines = len(report_text.strip().split("\n"))
-                    print(f"   [Done] {scout_def['name']}: {lines} lines")
-                else:
-                    print(f"   [Warning] Scout {scout_key} did not produce a report")
-                    reports[scout_key] = f"## Scout Report: {scout_def['name']}\n### Key Findings\nNo report produced.\n"
-
-            except Exception as e:
-                print(f"   [Error] Scout {scout_key} failed: {e}")
-                reports[scout_key] = f"## Scout Report: {scout_def['name']}\n### Key Findings\nScout failed: {e}\n"
-
-        # Store individual reports for filtered writer access
-        self._scout_reports_by_key = reports
-
-        # Concatenate all reports (planner gets everything)
-        combined = "\n\n---\n\n".join(reports.values())
-        print(f"\n[Scouts] All reports collected: {len(combined)} chars total")
-        return combined
+    def _apply_scout_result(self, result: ScoutResult) -> None:
+        """Store scout results on self for backward-compatible access."""
+        self._repo_metrics = result.repo_metrics
+        self._module_map = result.module_map
+        self._budget_ratio = result.budget_ratio
+        self._scout_reports_by_key = result.reports_by_key
+        self._compressed_reports_by_key = result.compressed_reports_by_key
+        self._compressed_scout_reports = result.compressed_text
 
     # ------------------------------------------------------------------
     # Tier 1: Planner (pure reasoning, no tools)
     # ------------------------------------------------------------------
 
-    def _planner_think(self, scout_reports: str) -> dict:
-        """
-        Pure reasoning: Planner reads scout reports and outputs a JSON
-        documentation blueprint. No filesystem access — just thinking.
-        """
-        crate_path = f"{self.collection}{self.repo_name}".rstrip("/")
+    def _planner_think(self, scout_reports: str, existing_docs: list[dict] | None = None) -> dict:
+        """Delegate to planner.plan()."""
+        return self.planner.plan(scout_reports, existing_docs)
 
-        doc_types_desc = "\n".join(
-            f'  - "{k}": {v["title"]}'
-            for k, v in sorted(DOCUMENT_TYPES.items())
-        )
-
-        planner_prompt = f"""You are a documentation architect designing a WIKI — not a book.
-
-You have received intelligence reports from scouts who explored a codebase.
-Design a rich, interconnected documentation wiki with many SHORT focused pages
-organized in a logical folder structure.
-
-SCOUT REPORTS:
-{scout_reports}
-
-DESIGN PHILOSOPHY:
-Think like a human who spent quality time organizing a knowledge base:
-- Each page is SHORT: 1-2 printed pages max. If a topic is big, split it.
-- Pages are organized in FOLDERS that mirror the project's architecture.
-- Pages are DENSELY WIKILINKED — every page references 10-20+ other pages.
-- The structure feels like navigating a well-crafted wiki, not reading a PDF.
-
-FOLDER STRUCTURE:
-Use the path field to organize pages. The base path is "{crate_path}".
-The path is the FOLDER the document lives in — a file named after the title
-will be created inside it.
-
-Rules:
-- Use folders to GROUP related documents (2+ docs per folder).
-- Standalone pages go directly in "{crate_path}" (no subfolder needed).
-- Max 2 levels deep. Never create a subfolder that holds only 1 document.
-
-GOOD example:
-  "{crate_path}"                    → Overview
-  "{crate_path}"                    → Getting Started
-  "{crate_path}"                    → Deployment
-  "{crate_path}/architecture"       → Architecture Overview
-  "{crate_path}/architecture"       → Backend Architecture
-  "{crate_path}/architecture"       → Frontend Architecture
-  "{crate_path}/architecture"       → Data Model
-  "{crate_path}/api"                → API Overview
-  "{crate_path}/api"                → Authentication
-  "{crate_path}/api"                → Endpoints Reference
-  "{crate_path}/config"             → Configuration
-  "{crate_path}/config"             → Environment Variables
-
-BAD (one subfolder per doc):
-  "{crate_path}/architecture/backend/backend-architecture"
-  "{crate_path}/features/wiki-links/wikilink-system"
-  "{crate_path}/deployment/docker/docker-deployment"
-
-MANDATORY PAGES (always include these, no exceptions):
-  1. "Overview" at "{crate_path}" — what the project is, key components, system diagram
-  2. "Getting Started" at "{crate_path}" — prerequisites, install, run in 5 minutes
-  3. "Capabilities & User Stories" at "{crate_path}" — business-facing document describing
-     what a user can DO with this tool. Written from the user's perspective, NOT the
-     developer's. Include:
-     - User stories in "As a [role], I can [action], so that [benefit]" format
-     - A functional capability matrix (feature → what it does → who it's for)
-     - End-to-end workflows a user would follow
-     - Client-facing descriptions suitable for product docs or onboarding material
-     This page should read like product documentation, not engineering docs.
-
-These three pages MUST appear first in the documents list. Every other page is up
-to your judgement based on the scout reports.
-
-PAGE COUNT GUIDELINES:
-  - Small repos (< 10 source files): 5-8 pages
-  - Medium repos (10-50 files): 8-15 pages
-  - Large repos (50+ files): 15-25 pages
-Each page should cover ONE focused topic. When in doubt, split.
-
-WIKILINKS ARE THE MOST IMPORTANT THING:
-For each page, list ALL other pages it should link to in wikilinks_out.
-Every page should link to 5-15 other pages. The wikilink graph should be
-DENSE — a reader should be able to navigate the entire wiki by clicking
-through links. Think of it as a dependency/relationship map.
-
-FORMAT CHOICES:
-For each section, specify what format best serves comprehension:
-  "table:..." — structured data, comparisons, specifications
-  "diagram:..." — architecture, flows, relationships, data models
-  "code:..." — examples, setup commands, API usage
-  "wikilinks:..." — navigation to related pages
-
-OUTPUT INSTRUCTIONS:
-Output ONLY a valid JSON object (no markdown fences, no commentary).
-
-{{
-  "repo_summary": "One paragraph describing the project",
-  "complexity": "small|medium|large",
-  "reader_journey": "Overview → Getting Started → Architecture → API → Config",
-  "documents": [
-    {{
-      "doc_type": "overview",
-      "title": "Overview",
-      "path": "{crate_path}",
-      "rationale": "Index page — orients the reader and links to everything",
-      "sections": [
-        {{
-          "heading": "What is this project?",
-          "format_rationale": "Prose intro with diagram for immediate mental model",
-          "rich_content": ["diagram:high-level system overview"]
-        }},
-        {{
-          "heading": "Key Components",
-          "format_rationale": "Table linking to each component's dedicated page",
-          "rich_content": ["table:components with links to their pages"]
-        }}
-      ],
-      "key_files_to_read": ["README.md"],
-      "wikilinks_out": ["Getting Started", "Architecture", "Backend API", "Configuration"]
-    }},
-    {{
-      "doc_type": "component",
-      "title": "Document Service",
-      "path": "{crate_path}/architecture",
-      "rationale": "Focused page on one core service — keeps pages short",
-      "sections": [
-        {{
-          "heading": "Purpose",
-          "format_rationale": "Brief prose explaining what this service does",
-          "rich_content": []
-        }},
-        {{
-          "heading": "Interface",
-          "format_rationale": "Table of public methods is scannable",
-          "rich_content": ["table:public methods with signatures"]
-        }}
-      ],
-      "key_files_to_read": ["app/services/document_service.py"],
-      "wikilinks_out": ["Document Repository", "Version Service", "API Endpoints"]
-    }}
-  ]
-}}
-
-SPLITTING RULE — LARGE TOPICS MUST BE SPLIT:
-If a topic has more than ~5 distinct items (endpoints, services, config sections,
-models), it MUST be split into multiple pages. Examples:
-  - "API Reference" with 12 endpoints → split by resource: "Users API", "Documents API", "Auth API"
-  - "Architecture" covering frontend + backend + infra → split: "Backend Architecture", "Frontend Architecture", "Infrastructure"
-  - "Configuration" with 20+ env vars → split by concern: "Database Config", "Auth Config", "Deployment Config"
-ONE page should NEVER try to cover more than one resource group or domain.
-The parent/overview page links to the sub-pages with a brief summary table.
-
-CRITICAL RULES:
-- Create MANY small pages (see page count guidelines), NOT few large ones
-- Each page: 2-4 sections max. Keep it SHORT.
-- Every page must have wikilinks_out with 5-15 other page titles
-- Use nested paths for folder organization
-- doc_type is a loose tag (overview, architecture, api, component, guide, config, data-model, capabilities, etc.)
-- Output ONLY the JSON object
-"""
-
-        print("[Planner] Analyzing scout reports and designing blueprint...")
-        try:
-            response = self.planner_llm.completion(
-                messages=[
-                    Message(role="user", content=[TextContent(text=planner_prompt)])
-                ],
-            )
-
-            # LLMResponse.message.content is a list of content objects
-            raw_text = ""
-            for block in response.message.content:
-                if hasattr(block, "text"):
-                    raw_text += block.text
-
-            # Try to extract JSON from the response
-            # Handle cases where the model wraps in ```json fences
-            json_text = raw_text.strip()
-            if json_text.startswith("```"):
-                # Strip markdown code fences
-                json_text = re.sub(r"^```(?:json)?\s*\n?", "", json_text)
-                json_text = re.sub(r"\n?```\s*$", "", json_text)
-
-            blueprint = json.loads(json_text)
-
-            if isinstance(blueprint, dict) and "documents" in blueprint:
-                docs = blueprint["documents"]
-                # Ensure path is set on all documents
-                for doc in docs:
-                    if "path" not in doc:
-                        doc["path"] = crate_path
-                print(f"[Planner] Blueprint ready: {len(docs)} documents")
-                print(f"   Complexity: {blueprint.get('complexity', 'unknown')}")
-                print(f"   Journey: {blueprint.get('reader_journey', 'N/A')}")
-                for doc in docs:
-                    rationale = doc.get("rationale", "")
-                    print(f"   - {doc['title']} ({doc['doc_type']}): {rationale[:60]}...")
-                return blueprint
-
-            print("[Planner] Response was not a valid blueprint, using fallback")
-        except json.JSONDecodeError as e:
-            print(f"[Planner] Failed to parse JSON ({e}), using fallback")
-        except Exception as e:
-            print(f"[Planner] Planning failed ({e}), using fallback")
-
-        return self._fallback_plan(crate_path)
+    def _sanitize_wikilinks(self, content: str, valid_titles: set[str], repo_url: str) -> str:
+        """Delegate to planner.sanitize_wikilinks()."""
+        return sanitize_wikilinks(content, valid_titles, repo_url)
 
     def _fallback_plan(self, crate_path: str) -> dict:
-        """Deterministic fallback when planner fails — generates a basic wiki structure."""
-        try:
-            result = subprocess.run(
-                ["find", ".", "-name", "*.py", "-o", "-name", "*.js",
-                 "-o", "-name", "*.ts", "-o", "-name", "*.go",
-                 "-o", "-name", "*.rs", "-o", "-name", "*.java"],
-                cwd=self.repo_path,
-                capture_output=True, text=True,
-            )
-            file_count = len(result.stdout.strip().split("\n"))
-        except Exception:
-            file_count = 20
-
-        if file_count < 10:
-            complexity = "small"
-        elif file_count < 50:
-            complexity = "medium"
-        else:
-            complexity = "large"
-
-        # Build a wiki-style page set based on complexity
-        all_titles = []
-        documents = []
-
-        # Always include these core pages
-        core_pages = [
-            {"doc_type": "overview", "title": "Overview", "path": crate_path,
-             "sections": [
-                 {"heading": "What is this project?", "rich_content": ["diagram:system overview"]},
-                 {"heading": "Key Components", "rich_content": ["table:components"]},
-             ], "key_files_to_read": ["README.md"]},
-            {"doc_type": "capabilities", "title": "Capabilities & User Stories", "path": crate_path,
-             "sections": [
-                 {"heading": "User Stories", "rich_content": []},
-                 {"heading": "Feature Matrix", "rich_content": ["table:capabilities"]},
-                 {"heading": "Key Workflows", "rich_content": ["diagram:user workflows"]},
-             ], "key_files_to_read": ["README.md"]},
-            {"doc_type": "quickstart", "title": "Getting Started", "path": f"{crate_path}/getting-started",
-             "sections": [
-                 {"heading": "Prerequisites", "rich_content": ["table:requirements"]},
-                 {"heading": "Installation", "rich_content": ["code:install"]},
-             ], "key_files_to_read": ["README.md"]},
-            {"doc_type": "architecture", "title": "Architecture", "path": f"{crate_path}/architecture",
-             "sections": [
-                 {"heading": "System Design", "rich_content": ["diagram:architecture"]},
-                 {"heading": "Components", "rich_content": ["table:components"]},
-             ], "key_files_to_read": ["README.md"]},
-            {"doc_type": "api", "title": "API Reference", "path": f"{crate_path}/api",
-             "sections": [
-                 {"heading": "Endpoints", "rich_content": ["table:endpoints"]},
-             ], "key_files_to_read": ["README.md"]},
-        ]
-
-        if complexity in ("medium", "large"):
-            core_pages.extend([
-                {"doc_type": "config", "title": "Configuration", "path": f"{crate_path}/config",
-                 "sections": [
-                     {"heading": "Environment Variables", "rich_content": ["table:env vars"]},
-                     ], "key_files_to_read": ["README.md"]},
-                {"doc_type": "guide", "title": "User Guide", "path": f"{crate_path}/guide",
-                 "sections": [
-                     {"heading": "Core Workflow", "rich_content": ["diagram:workflow"]},
-                     ], "key_files_to_read": ["README.md"]},
-            ])
-
-        if complexity == "large":
-            core_pages.extend([
-                {"doc_type": "data-model", "title": "Data Model", "path": f"{crate_path}/architecture/data-model",
-                 "sections": [
-                     {"heading": "Schema", "rich_content": ["diagram:ER diagram"]},
-                     ], "key_files_to_read": ["README.md"]},
-                {"doc_type": "contributing", "title": "Contributing", "path": f"{crate_path}/contributing",
-                 "sections": [
-                     {"heading": "Development Setup", "rich_content": ["code:setup"]},
-                     ], "key_files_to_read": ["README.md"]},
-            ])
-
-        all_titles = [p["title"] for p in core_pages]
-        for page in core_pages:
-            page["wikilinks_out"] = [t for t in all_titles if t != page["title"]]
-            documents.append(page)
-
-        return {
-            "repo_summary": f"Repository {self.repo_name}",
-            "complexity": complexity,
-            "documents": documents,
-        }
-
-    # ------------------------------------------------------------------
-    # Scout → Writer relevance mapping
-    # ------------------------------------------------------------------
-
-    # Which scout reports are most relevant for each doc type
-    _SCOUT_RELEVANCE = {
-        "overview":      ["structure", "architecture"],
-        "quickstart":    ["structure", "infra"],
-        "architecture":  ["architecture", "structure"],
-        "api":           ["api", "architecture"],
-        "config":        ["infra", "structure"],
-        "guide":         ["api", "architecture", "structure"],
-        "data-model":    ["architecture", "api"],
-        "component":     ["architecture", "api"],
-        "contributing":  ["tests", "structure", "infra"],
-        "capabilities": ["structure", "api", "architecture"],
-    }
+        """Delegate to planner.fallback_plan()."""
+        return self.planner.fallback_plan(crate_path)
 
     def _get_relevant_scout_reports(self, doc_type: str) -> str:
-        """Get scout reports relevant to a specific doc type, falling back to all."""
-        if not hasattr(self, "_scout_reports_by_key") or not self._scout_reports_by_key:
-            return ""
-        relevant_keys = self._SCOUT_RELEVANCE.get(doc_type, list(self._scout_reports_by_key.keys()))
-        parts = []
-        for key in relevant_keys:
-            if key in self._scout_reports_by_key:
-                parts.append(self._scout_reports_by_key[key])
-        # Always include structure as baseline context if not already included
-        if "structure" not in relevant_keys and "structure" in self._scout_reports_by_key:
-            parts.append(self._scout_reports_by_key["structure"])
-        return "\n\n---\n\n".join(parts) if parts else ""
+        """Get scout reports relevant to a specific doc type."""
+        reports = getattr(self, "_scout_reports_by_key", {})
+        return get_relevant_reports(doc_type, reports)
 
     # ------------------------------------------------------------------
     # Tier 2: Writers
@@ -1156,9 +392,9 @@ CRITICAL RULES:
 
     def _build_writer_brief(
         self,
-        doc_spec: dict,
-        blueprint: dict,
-        discovery: dict,
+        doc_spec: dict[str, Any],
+        blueprint: dict[str, Any],
+        discovery: dict[str, dict[str, Any]],
         scout_reports: str,
     ) -> str:
         """
@@ -1217,12 +453,12 @@ CRITICAL RULES:
         doc_context = self._build_document_context(discovery)
 
         # Output path supports nested folders from planner
-        doc_path = doc_spec.get("path", f"{self.collection}{self.repo_name}".rstrip("/"))
+        doc_path = doc_spec.get("path", f"{self.crate}{self.repo_name}".rstrip("/"))
         safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '-').lower()
         output_filename = f"{safe_title}.md"
         output_path = self.notes_dir / doc_path / output_filename
-        # Writer sees workspace-relative path (it can't write outside workspace)
-        workspace_output = Path("notes") / doc_path / output_filename
+        # Absolute path for file_editor (requires absolute paths starting with /)
+        absolute_output = self.repo_path / "notes" / doc_path / output_filename
 
         brief = f"""You are a technical documentation writer. Write ONE short, focused wiki page:
 "{title}" for the project at {self.repo_path}.
@@ -1264,9 +500,15 @@ with the following sections:
 DO NOT add a "See Also" section. All wikilinks must be inline in prose.
 
 OUTPUT:
-- Create the directory structure first: mkdir -p {workspace_output.parent}
-- Write the COMPLETE markdown page to: {workspace_output}
-- This path is RELATIVE to your workspace root — do NOT use absolute paths
+- Write the COMPLETE markdown page to this EXACT path: {absolute_output}
+- The directory already exists — just write the file.
+- CRITICAL: You MUST use the file_editor tool with command="create" and this EXACT path.
+  Example: file_editor command=create path={absolute_output} file_text="# Title..."
+  Do NOT use touch, echo, or cat. Do NOT modify the path.
+- WRITE THE FILE EARLY. Read the key files marked above, then write a COMPLETE,
+  high-quality page. After writing, you may read additional files and overwrite
+  the page with an improved version. But the file MUST exist on disk within your
+  first 10 commands. Never spend many turns exploring before writing.
 - Keep it SHORT — this is one page in a larger wiki
 - Link to other pages liberally using [[Page Title]] for anything worth expanding on
 - Base everything on verified facts from the code you read
@@ -1275,138 +517,88 @@ OUTPUT:
         return brief
 
     # ------------------------------------------------------------------
+    # Source file provenance tracking
+    # ------------------------------------------------------------------
+
+    def _extract_source_references(
+        self, content: str, key_files: list[str] | None = None
+    ) -> list[str]:
+        """Extract source file paths referenced in generated documentation.
+
+        Looks for:
+          - Code block annotations: ```python title="path/to/file.py"
+          - Inline file references: `path/to/file.py`
+          - key_files_to_read from the doc spec (planner-directed)
+
+        Returns:
+            sorted list of unique relative file paths
+        """
+        refs: set[str] = set()
+
+        # key_files_to_read from the planner spec
+        if key_files:
+            refs.update(key_files)
+
+        # Code block title annotations
+        for match in re.finditer(r'```\w*\s+title="([^"]+)"', content):
+            refs.add(match.group(1))
+
+        # Inline code that looks like file paths (must contain / or end with known ext)
+        for match in re.finditer(r'`([^`]+\.\w{1,4})`', content):
+            candidate = match.group(1)
+            if "/" in candidate or candidate.endswith((".py", ".ts", ".tsx", ".js", ".go", ".rs")):
+                # Skip things that look like code, not paths
+                if " " not in candidate and not candidate.startswith(("http", "/")):
+                    refs.add(candidate)
+
+        # Filter to files that actually exist in the repo
+        valid_refs = []
+        for ref in refs:
+            if (self.repo_path / ref).exists():
+                valid_refs.append(ref)
+
+        return sorted(valid_refs)
+
+    def _compute_source_hashes(self, file_paths: list[str]) -> dict[str, str]:
+        """Compute SHA-256 hashes of source files for change detection.
+
+        Args:
+            file_paths: relative paths within self.repo_path
+
+        Returns:
+            dict mapping relative_path → sha256_hex (first 16 chars)
+        """
+        hashes = {}
+        for fpath in file_paths:
+            full = self.repo_path / fpath
+            if not full.exists():
+                continue
+            try:
+                content = full.read_bytes()
+                hashes[fpath] = hashlib.sha256(content).hexdigest()[:FILE_HASH_LENGTH]
+            except OSError:
+                logger.debug("Could not hash file: %s", fpath)
+        return hashes
+
+    # ------------------------------------------------------------------
     # Orphan cleanup
     # ------------------------------------------------------------------
 
     def _snapshot_existing_docs(self) -> dict:
-        """Take a pre-generation snapshot of all docs belonging to this repo.
+        """Delegate to lifecycle.snapshot()."""
+        return self.lifecycle.snapshot()
 
-        Returns a dict with:
-            doc_ids: set of all doc IDs for this repo
-            by_id: dict mapping doc_id → doc summary
-            human_edited: set of doc IDs with human edits in the last 7 days
-            count: total number of docs
-        Returns empty sets on any failure (cleanup will be skipped).
-        """
-        try:
-            existing = self.api_client.get_documents_by_repo(self.repo_url)
-            if not existing:
-                return {"doc_ids": set(), "by_id": {}, "human_edited": set(), "count": 0}
-
-            doc_ids = set()
-            by_id = {}
-            human_edited = set()
-
-            for doc in existing:
-                doc_id = doc.get("id")
-                if not doc_id:
-                    continue
-                doc_ids.add(doc_id)
-                by_id[doc_id] = doc
-
-                # Check version history for human edits within 7 days
-                try:
-                    versions = self.api_client.get_document_versions(doc_id)
-                    for version in versions:
-                        author_type = version.get("author_type", "")
-                        if author_type == "human":
-                            created = version.get("created_at", "")
-                            if created:
-                                from datetime import timezone
-                                version_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                                age = datetime.now(timezone.utc) - version_dt
-                                if age.days < 7:
-                                    human_edited.add(doc_id)
-                                    break
-                except Exception:
-                    pass  # If we can't check versions, don't mark as human-edited
-
-            print(f"[Snapshot] {len(doc_ids)} existing doc(s) for this repo, {len(human_edited)} human-edited (7d)")
-            return {
-                "doc_ids": doc_ids,
-                "by_id": by_id,
-                "human_edited": human_edited,
-                "count": len(doc_ids),
-            }
-        except Exception as e:
-            print(f"[Snapshot] Failed to snapshot existing docs: {e}")
-            return {"doc_ids": set(), "by_id": {}, "human_edited": set(), "count": 0}
-
-    def _cleanup_orphaned_docs(
-        self,
-        snapshot: dict,
-        generated_ids: set,
-        failed_ids: set,
-    ) -> dict:
-        """Delete orphaned AI-generated docs, preserving human-edited and failed ones.
-
-        Args:
-            snapshot: Result from _snapshot_existing_docs().
-            generated_ids: Doc IDs that were successfully generated this run.
-            failed_ids: Doc IDs that failed generation this run.
-
-        Returns:
-            Dict with deleted, preserved_human, preserved_failed, errors counts.
-        """
-        result = {"deleted": 0, "preserved_human": 0, "preserved_failed": 0, "errors": []}
-
-        if not snapshot["doc_ids"]:
-            print("[Cleanup] No snapshot — skipping orphan cleanup")
-            return result
-
-        orphans = snapshot["doc_ids"] - generated_ids - failed_ids
-        if not orphans:
-            print("[Cleanup] No orphaned documents found")
-            return result
-
-        human_edited = snapshot["human_edited"]
-        to_delete = orphans - human_edited
-        preserved_human = orphans & human_edited
-
-        result["preserved_human"] = len(preserved_human)
-        result["preserved_failed"] = len(failed_ids & snapshot["doc_ids"])
-
-        if preserved_human:
-            for doc_id in preserved_human:
-                title = snapshot["by_id"].get(doc_id, {}).get("title", doc_id)
-                print(f"[Cleanup] Preserving human-edited: {title} ({doc_id})")
-
-        if not to_delete:
-            print(f"[Cleanup] {len(orphans)} orphan(s) found, all preserved (human-edited)")
-            return result
-
-        print(f"[Cleanup] Deleting {len(to_delete)} orphaned doc(s)...")
-        for doc_id in to_delete:
-            title = snapshot["by_id"].get(doc_id, {}).get("title", doc_id)
-            print(f"   - {title} ({doc_id})")
-
-        delete_result = self.api_client.batch_delete(list(to_delete))
-        result["deleted"] = delete_result.get("succeeded", 0)
-        result["errors"] = delete_result.get("errors", [])
-
-        if result["errors"]:
-            print(f"[Cleanup] Batch delete had errors: {result['errors']}")
-
-        print(f"[Cleanup] Done: {result['deleted']} deleted, {result['preserved_human']} preserved (human), {result['preserved_failed']} preserved (failed)")
-        return result
+    def _cleanup_orphaned_docs(self, snapshot: dict, generated_ids: set, failed_ids: set) -> dict:
+        """Delegate to lifecycle.cleanup_orphans()."""
+        return self.lifecycle.cleanup_orphans(snapshot, generated_ids, failed_ids)
 
     # ------------------------------------------------------------------
     # Generation
     # ------------------------------------------------------------------
 
     def _get_current_commit_sha(self) -> str:
-        """Get current commit SHA of the repository."""
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=self.repo_path,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return result.stdout.strip()
-        except Exception:
-            return "unknown"
+        """Delegate to get_current_commit_sha()."""
+        return get_current_commit_sha(self.repo_path)
 
     def generate_document(
         self,
@@ -1414,41 +606,90 @@ OUTPUT:
         blueprint: dict,
         discovery: dict,
         scout_reports: str,
+        title_to_doc_id: dict | None = None,
+        snapshot_by_id: dict | None = None,
+        writer_agent: "Agent | None" = None,
     ) -> dict:
         """
         Generate a single document using a Writer agent.
 
         Args:
-            doc_spec:       One entry from blueprint["documents"]
-            blueprint:      The full planner blueprint
-            discovery:      Existing documents for cross-referencing
-            scout_reports:  Concatenated scout intelligence reports
+            doc_spec:        One entry from blueprint["documents"]
+            blueprint:       The full planner blueprint
+            discovery:       Existing documents for cross-referencing
+            scout_reports:   Concatenated scout intelligence reports
+            title_to_doc_id: Optional map of existing title → doc_id for reuse
+            snapshot_by_id:  Optional map of doc_id → doc summary from snapshot
+            writer_agent:    Optional independent Agent for parallel execution
 
         Returns:
             Result dict with status, doc_id, etc.
         """
         doc_type = doc_spec["doc_type"]
         title = doc_spec["title"]
-        path = doc_spec.get("path", f"{self.collection}{self.repo_name}".rstrip("/"))
+        path = doc_spec.get("path", f"{self.crate}{self.repo_name}".rstrip("/"))
 
-        doc_id = generate_doc_id(self.repo_url, path, title, doc_type)
+        # Title-based ID resolution: reuse existing doc IDs to prevent duplicates.
+        # api_path/api_title are what we send to the backend (must match existing ID).
+        # path/title stay as the planner intended (used for output files and writer briefs).
+        doc_id = None
+        resolved_from = None
+        api_path = path
+        api_title = title
+
+        if title_to_doc_id:
+            # Direct title match
+            if title in title_to_doc_id:
+                doc_id = title_to_doc_id[title]
+                resolved_from = f"title match: \"{title}\""
+
+            # replaces_title: planner is renaming an existing doc
+            if not doc_id:
+                replaces = doc_spec.get("replaces_title")
+                if replaces and replaces in title_to_doc_id:
+                    doc_id = title_to_doc_id[replaces]
+                    resolved_from = f"replaces: \"{replaces}\" → \"{title}\""
+
+        if doc_id and snapshot_by_id and doc_id in snapshot_by_id:
+            # Override API path/title so the backend computes the same doc_id
+            existing = snapshot_by_id[doc_id]
+            api_path = existing.get("path", path)
+            api_title = existing.get("title", title)
+
+        if not doc_id:
+            doc_id = generate_doc_id(self.repo_url, path, title, doc_type)
+            resolved_from = "computed (new)"
+
         commit_sha = self._get_current_commit_sha()
 
         print(f"\n{'='*70}")
-        print(f"[Writer] GENERATING: {title} ({doc_type})")
+        print(f"[Writer] GENERATING: {doc_spec['title']} ({doc_type})")
         print(f"{'='*70}")
-        print(f"   Doc ID: {doc_id}")
+        print(f"   Doc ID: {doc_id} ({resolved_from})")
 
         # Check version priority
         priority_engine = VersionPriorityEngine(
             api_client=self.api_client, repo_path=self.repo_path
         )
+        # Fast path: source-level check (skips commit analysis if source files unchanged)
+        key_files = doc_spec.get("key_files_to_read", [])
+        if key_files:
+            current_hashes = self._compute_source_hashes(key_files)
+            if current_hashes:
+                should_gen, src_reason, changed = priority_engine.should_regenerate_targeted(
+                    doc_id, current_hashes
+                )
+                if not should_gen:
+                    print(f"   [Skip] {src_reason} (source-level)")
+                    return {"status": "skipped", "reason": src_reason, "doc_id": doc_id, "resolved_from": resolved_from}
+
+        # Full version priority check (commit-level)
         should_generate, reason = priority_engine.should_regenerate(
             doc_id=doc_id, current_commit_sha=commit_sha
         )
         if not should_generate:
             print(f"   [Skip] {reason}")
-            return {"status": "skipped", "reason": reason, "doc_id": doc_id}
+            return {"status": "skipped", "reason": reason, "doc_id": doc_id, "resolved_from": resolved_from}
 
         print(f"   [Generate] {reason}")
 
@@ -1456,19 +697,28 @@ OUTPUT:
         brief = self._build_writer_brief(doc_spec, blueprint, discovery, scout_reports)
 
         # Compute output path matching what the writer brief specifies
-        doc_path = doc_spec.get("path", f"{self.collection}{self.repo_name}".rstrip("/"))
+        doc_path = doc_spec.get("path", f"{self.crate}{self.repo_name}".rstrip("/"))
         safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '-').lower()
         output_filename = f"{safe_title}.md"
         output_file = self.notes_dir / doc_path / output_filename
+        # Path the agent will write to (inside workspace)
+        workspace_write_path = self.repo_path / "notes" / doc_path / output_filename
 
         try:
-            # Ensure output directory exists
+            # Ensure output directories exist BEFORE agent runs
             output_file.parent.mkdir(parents=True, exist_ok=True)
+            workspace_write_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Run writer agent
+            # Maximum agent turns before forcing termination. Writers are told
+            # to write early (within 10 commands), so this is a safety net.
+            # Higher = more time for revision passes; lower = faster failure.
+            # 100 iterations ≈ 15-20 min at typical LLM latency.
+            writer_max_iters = 100
+            agent = writer_agent or self.writer_agent
             conversation = Conversation(
-                agent=self.writer_agent,
+                agent=agent,
                 workspace=str(self.repo_path),
+                max_iteration_per_run=writer_max_iters,
             )
             conversation.send_message(brief)
             conversation.run()
@@ -1499,6 +749,7 @@ OUTPUT:
                     "status": "warning",
                     "message": f"Output file not found for {title}",
                     "doc_id": doc_id,
+                    "resolved_from": resolved_from,
                 }
 
             # Read and clean content
@@ -1512,6 +763,21 @@ OUTPUT:
                 r"\n---\n\n\*Documentation.*$", "", body, flags=re.DOTALL
             )
 
+            # Sanitize wikilinks: keep valid, convert files to GitHub, strip rest
+            valid_titles = {d["title"] for d in blueprint.get("documents", [])}
+            clean_content = self._sanitize_wikilinks(clean_content, valid_titles, self.repo_url)
+
+            # Check for empty content (writer failed to write file properly)
+            if not clean_content.strip():
+                print(f"   [Error] Writer produced empty file — agent likely used touch instead of file_editor")
+                return {
+                    "status": "error",
+                    "doc_id": doc_id,
+                    "error": "empty_content",
+                    "message": "Writer agent created empty file. It may have output content to stdout instead of using file_editor create.",
+                    "resolved_from": resolved_from,
+                }
+
             # Verify rich content
             has_table = "|" in clean_content and "---" in clean_content
             has_mermaid = "```mermaid" in clean_content
@@ -1523,12 +789,18 @@ OUTPUT:
 
             keywords = DOCUMENT_TYPES.get(doc_type, {}).get("keywords", [])
 
-            # POST to API
+            # Source file provenance tracking
+            key_files = doc_spec.get("key_files_to_read", [])
+            source_files = self._extract_source_references(clean_content, key_files)
+            source_hashes = self._compute_source_hashes(source_files)
+
+            # POST to API — use api_path/api_title so the backend computes
+            # the same doc_id as our resolved one (prevents duplicates)
             doc_data = {
                 "repo_url": self.repo_url,
                 "repo_name": self.repo_name,
-                "path": doc_path,
-                "title": title,
+                "path": api_path,
+                "title": api_title,
                 "doc_type": doc_type,
                 "content": clean_content,
                 "keywords": keywords,
@@ -1539,6 +811,8 @@ OUTPUT:
                     "planner_model": PLANNER_MODEL,
                     "writer_model": WRITER_MODEL,
                     "repo_commit_sha": commit_sha,
+                    "source_files": source_files,
+                    "source_hashes": source_hashes,
                 },
             }
 
@@ -1562,24 +836,147 @@ OUTPUT:
                     "method": api_result.get("method", "api"),
                     "size": content_size,
                     "api_result": api_result,
+                    "resolved_from": resolved_from,
                 }
 
             except Exception as e:
-                print(f"   [Error] Failed to post: {e}")
+                logger.error("Failed to post document: %s", e)
                 return {
                     "status": "error_fallback",
                     "doc_id": doc_id,
                     "error": str(e),
                     "file": str(output_file),
+                    "resolved_from": resolved_from,
                 }
 
         except Exception as e:
-            print(f"   [Error] Generation failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {"status": "error", "error": str(e)}
+            logger.error("Generation failed: %s", e, exc_info=True)
+            return {"status": "error", "error": str(e), "resolved_from": resolved_from}
 
-    def generate_all(self) -> dict:
+    # ------------------------------------------------------------------
+    # Parallel writer support
+    # ------------------------------------------------------------------
+
+    def _create_writer_agent(self) -> Agent:
+        """Create an independent Writer Agent + LLM for thread-safe parallel use.
+
+        Each parallel writer thread needs its own Agent/LLM/Condenser
+        to avoid shared state between concurrent conversations.
+        """
+        writer_kwargs = _llm_kwargs("WRITER")
+        llm = LLM(
+            model=WRITER_MODEL,
+            native_tool_calling=LLM_NATIVE_TOOL_CALLING,
+            timeout=900,
+            max_output_tokens=self._writer_config.max_output_tokens,
+            litellm_extra_body=self._writer_config.extra_body or {},
+            **self._writer_config.extra_llm_kwargs,
+            **writer_kwargs,
+        )
+        condenser_size = max(20, self._writer_config.context_window // 4000)
+        condenser = LLMSummarizingCondenser(
+            llm=llm, max_size=condenser_size, keep_first=2,
+        )
+        return Agent(
+            llm=llm,
+            tools=[
+                Tool(name=TerminalTool.name),
+                Tool(name=FileEditorTool.name),
+                Tool(name=TaskTrackerTool.name),
+            ],
+            condenser=condenser,
+        )
+
+    def _run_writers_parallel(
+        self,
+        documents: list[dict],
+        blueprint: dict,
+        discovery: dict,
+        scout_reports: str,
+        title_to_doc_id: dict[str, str] | None,
+        snapshot_by_id: dict | None,
+        max_workers: int = 3,
+    ) -> tuple[dict[str, dict], set, set, dict]:
+        """Run writer agents in parallel using ThreadPoolExecutor.
+
+        Writers are divided into two waves:
+          Wave 1: Detail/leaf pages (can all run in parallel)
+          Wave 2: Hub pages (overview, capabilities, quickstart) — run after
+                  wave 1 completes since they link to everything
+
+        Returns:
+            (results_dict, generated_ids, failed_ids, id_stats)
+        """
+        _HUB_TYPES = {"overview", "capabilities", "quickstart"}
+        detail_docs = [d for d in documents if d.get("doc_type") not in _HUB_TYPES]
+        hub_docs = [d for d in documents if d.get("doc_type") in _HUB_TYPES]
+
+        results: dict[str, dict] = {}
+        generated_ids: set = set()
+        failed_ids: set = set()
+        id_stats = {"reused": 0, "new": 0, "renamed": 0}
+        total = len(documents)
+
+        def _process_result(doc_title: str, result: dict) -> None:
+            """Track a single result (called from main thread)."""
+            results[doc_title] = result
+            doc_id = result.get("doc_id")
+            if doc_id:
+                status = result.get("status", "")
+                if status in ("success", "skipped"):
+                    generated_ids.add(doc_id)
+                elif status in ("error", "error_fallback", "warning"):
+                    failed_ids.add(doc_id)
+            resolved = result.get("resolved_from", "")
+            if "replaces:" in resolved:
+                id_stats["renamed"] += 1
+            elif "title match:" in resolved:
+                id_stats["reused"] += 1
+            else:
+                id_stats["new"] += 1
+
+        def _run_one(doc_spec: dict, idx: int, agent: Agent) -> tuple[str, dict]:
+            """Run a single writer in a thread. Returns (title, result)."""
+            print(f"\n[{idx}/{total}] Dispatching writer for: {doc_spec['title']}")
+            result = self.generate_document(
+                doc_spec, blueprint, discovery, scout_reports,
+                title_to_doc_id=title_to_doc_id,
+                snapshot_by_id=snapshot_by_id,
+                writer_agent=agent,
+            )
+            return doc_spec["title"], result
+
+        # Wave 1: Detail pages in parallel
+        if detail_docs:
+            print(f"\n[Wave 1] {len(detail_docs)} detail pages (max {max_workers} parallel)...")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {}
+                for idx, doc_spec in enumerate(detail_docs, 1):
+                    agent = self._create_writer_agent()
+                    future = executor.submit(_run_one, doc_spec, idx, agent)
+                    futures[future] = doc_spec["title"]
+
+                for future in as_completed(futures):
+                    try:
+                        title, result = future.result()
+                        _process_result(title, result)
+                    except Exception as e:
+                        title = futures[future]
+                        logger.error("Writer thread failed for %s: %s", title, e)
+                        _process_result(title, {"status": "error", "error": str(e)})
+
+        # Wave 2: Hub pages after detail pages complete (they reference everything)
+        if hub_docs:
+            offset = len(detail_docs)
+            print(f"\n[Wave 2] {len(hub_docs)} hub pages (sequential, after detail pages)...")
+            for idx, doc_spec in enumerate(hub_docs, offset + 1):
+                agent = self._create_writer_agent()
+                title, result = _run_one(doc_spec, idx, agent)
+                _process_result(title, result)
+
+        return results, generated_ids, failed_ids, id_stats
+
+    def generate_all(self, force: bool = False) -> dict:
         """
         Full pipeline: Scouts explore → Planner thinks → Writers execute.
         """
@@ -1600,7 +997,7 @@ OUTPUT:
             if not regen_ctx["git_diff"].strip() and not regen_ctx["git_log"].strip():
                 # Repo hasn't moved — check if any doc is actually stale
                 current_sha = self._get_current_commit_sha()
-                if regen_ctx["last_commit_sha"] == current_sha:
+                if regen_ctx["last_commit_sha"] == current_sha and not force:
                     print("\n[Pipeline] Repository unchanged since last generation — nothing to do.")
                     return results
 
@@ -1612,8 +1009,8 @@ OUTPUT:
             existing_summary = "\n\n---\n\n## Existing Documentation Content\n"
             for doc in regen_ctx["existing_docs"]:
                 existing_summary += f"\n### {doc['title']} ({doc['doc_type']})\n"
-                existing_summary += doc["content"][:3000]
-                if len(doc["content"]) > 3000:
+                existing_summary += doc["content"][:EXISTING_SUMMARY_TRUNCATION]
+                if len(doc["content"]) > EXISTING_SUMMARY_TRUNCATION:
                     existing_summary += "\n... [truncated]"
                 existing_summary += "\n"
             scout_reports += existing_summary
@@ -1624,48 +1021,84 @@ OUTPUT:
 
         # Phase 2: Planner designs documentation architecture
         print("\n[Phase 2] PLANNER — Designing documentation architecture...")
-        blueprint = self._planner_think(scout_reports)
+        planner_existing = regen_ctx["existing_docs"] if regen_ctx else None
+        blueprint = self._planner_think(scout_reports, existing_docs=planner_existing)
 
         documents = blueprint.get("documents", [])
 
-        # Reorder: detail/leaf pages first, hub pages last.
-        # Hub pages (overview, capabilities, quickstart) link to everything and
-        # benefit from all detail pages already existing in discovery.
-        _HUB_TYPES = {"overview", "capabilities", "quickstart"}
-        detail_docs = [d for d in documents if d.get("doc_type") not in _HUB_TYPES]
-        hub_docs = [d for d in documents if d.get("doc_type") in _HUB_TYPES]
-        documents = detail_docs + hub_docs
+        # Build title → doc_id map from snapshot for title-based ID resolution
+        title_to_doc_id: dict[str, str] = {}
+        if snapshot["by_id"]:
+            for doc_id, doc_info in snapshot["by_id"].items():
+                doc_title = doc_info.get("title", "")
+                if doc_title:
+                    if doc_title in title_to_doc_id:
+                        print(f"[Warning] Title collision: \"{doc_title}\" — keeping first match")
+                    else:
+                        title_to_doc_id[doc_title] = doc_id
+            if title_to_doc_id:
+                print(f"[ID Resolution] Built title→ID map with {len(title_to_doc_id)} entries")
 
         total = len(documents)
-        print(f"\n[Phase 3] WRITERS — Generating {total} documents (detail pages first, hub pages last)...")
 
-        # Discover existing docs (once, shared across writers)
+        # Discover existing docs (once, shared across all writers)
         discovery = self._discover_existing_documents()
         print(f"   Existing documents in system: {discovery['count']}")
 
-        # Phase 3: Writers execute
-        generated_doc_ids = set()
-        failed_doc_ids = set()
+        # Use compressed scout reports for writers (planner already got full reports)
+        writer_scout_reports = getattr(self, '_compressed_scout_reports', scout_reports)
 
-        for idx, doc_spec in enumerate(documents, 1):
-            print(f"\n[{idx}/{total}] Dispatching writer for: {doc_spec['title']}")
-            result = self.generate_document(
-                doc_spec, blueprint, discovery, scout_reports
+        # Phase 3: Writers execute (parallel or sequential based on WRITER_PARALLEL)
+        max_workers = int(os.getenv("WRITER_PARALLEL", "3"))
+        print(f"\n[Phase 3] WRITERS — Generating {total} documents "
+              f"(max {max_workers} parallel, detail first, hub last)...")
+
+        if max_workers > 1:
+            results, generated_doc_ids, failed_doc_ids, id_stats = self._run_writers_parallel(
+                documents=documents,
+                blueprint=blueprint,
+                discovery=discovery,
+                scout_reports=writer_scout_reports,
+                title_to_doc_id=title_to_doc_id if title_to_doc_id else None,
+                snapshot_by_id=snapshot["by_id"] if snapshot["by_id"] else None,
+                max_workers=max_workers,
             )
-            results[doc_spec["title"]] = result
+        else:
+            # Sequential fallback (WRITER_PARALLEL=1)
+            generated_doc_ids = set()
+            failed_doc_ids = set()
+            id_stats = {"reused": 0, "new": 0, "renamed": 0}
 
-            # Track generated/failed doc IDs for orphan cleanup
-            doc_id = result.get("doc_id")
-            if doc_id:
-                status = result.get("status", "")
-                if status in ("success", "skipped"):
-                    generated_doc_ids.add(doc_id)
-                elif status in ("error", "error_fallback", "warning"):
-                    failed_doc_ids.add(doc_id)
+            # Reorder: detail first, hub last
+            _HUB_TYPES = {"overview", "capabilities", "quickstart"}
+            detail_docs = [d for d in documents if d.get("doc_type") not in _HUB_TYPES]
+            hub_docs = [d for d in documents if d.get("doc_type") in _HUB_TYPES]
+            documents = detail_docs + hub_docs
 
-            # Re-discover after each doc so subsequent writers see earlier ones
-            if result.get("status") == "success":
-                discovery = self._discover_existing_documents()
+            for idx, doc_spec in enumerate(documents, 1):
+                print(f"\n[{idx}/{total}] Dispatching writer for: {doc_spec['title']}")
+                result = self.generate_document(
+                    doc_spec, blueprint, discovery, writer_scout_reports,
+                    title_to_doc_id=title_to_doc_id if title_to_doc_id else None,
+                    snapshot_by_id=snapshot["by_id"] if snapshot["by_id"] else None,
+                )
+                results[doc_spec["title"]] = result
+
+                doc_id = result.get("doc_id")
+                if doc_id:
+                    status = result.get("status", "")
+                    if status in ("success", "skipped"):
+                        generated_doc_ids.add(doc_id)
+                    elif status in ("error", "error_fallback", "warning"):
+                        failed_doc_ids.add(doc_id)
+
+                resolved = result.get("resolved_from", "")
+                if "replaces:" in resolved:
+                    id_stats["renamed"] += 1
+                elif "title match:" in resolved:
+                    id_stats["reused"] += 1
+                else:
+                    id_stats["new"] += 1
 
         # Summary
         print("\n" + "=" * 70)
@@ -1680,18 +1113,24 @@ OUTPUT:
         )
 
         print(f"   Pages: {total}  Success: {successes}  Skipped: {skipped}  Errors: {errors}")
+        if any(v > 0 for v in id_stats.values()):
+            print(f"   ID Resolution: {id_stats['reused']} reused, {id_stats['new']} new, {id_stats['renamed']} renamed")
 
         for title, result in results.items():
             status = result.get("status", "unknown")
             doc_id = result.get("doc_id", "")
-            print(f"   {title}: {status} ({doc_id})")
+            resolved = result.get("resolved_from", "")
+            id_info = f" [{resolved}]" if resolved else ""
+            print(f"   {title}: {status} ({doc_id}){id_info}")
 
         # Phase 4: Orphan cleanup
         if snapshot["count"] > 0:
             print("\n[Phase 4] CLEANUP — Removing orphaned documents...")
             cleanup = self._cleanup_orphaned_docs(snapshot, generated_doc_ids, failed_doc_ids)
-            if cleanup["deleted"] or cleanup["preserved_human"]:
-                print(f"   Deleted: {cleanup['deleted']}  Preserved (human): {cleanup['preserved_human']}  Preserved (failed): {cleanup['preserved_failed']}")
+            if cleanup["deleted"] or cleanup["preserved_human"] or cleanup.get("preserved_user_organized", 0):
+                print(f"   Deleted: {cleanup['deleted']}  Preserved (human): {cleanup['preserved_human']}  "
+                      f"Preserved (user-organized): {cleanup.get('preserved_user_organized', 0)}  "
+                      f"Preserved (failed): {cleanup['preserved_failed']}")
 
         return results
 
@@ -1708,15 +1147,15 @@ def main():
         epilog="""
 Examples:
   %(prog)s --repo https://github.com/facebook/react
-  %(prog)s --repo https://github.com/django/django --collection backend
+  %(prog)s --repo https://github.com/django/django --crate backend
   %(prog)s --repo https://github.com/user/repo --doc-type quickstart
         """,
     )
     parser.add_argument("--repo", required=True, help="GitHub repository URL")
     parser.add_argument(
-        "--collection",
+        "--crate",
         default="",
-        help="Optional collection prefix (e.g., 'backend')",
+        help="Optional crate prefix (e.g., 'backend')",
     )
     parser.add_argument(
         "--doc-type",
@@ -1753,6 +1192,11 @@ Examples:
         action="store_true",
         help="Disable native tool calling (use text-based fallback)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force regeneration even if repo is unchanged since last run",
+    )
     args = parser.parse_args()
 
     # Override config if specified via CLI
@@ -1776,21 +1220,21 @@ Examples:
         print(f"[Security] Repository URL validation failed: {error}")
         sys.exit(1)
 
-    # SECURITY: Validate collection path
+    # SECURITY: Validate crate path
     path_validator = PathValidator()
-    is_valid, error, sanitized_collection = path_validator.validate_collection(
-        args.collection
+    is_valid, error, sanitized_crate = path_validator.validate_collection(
+        args.crate
     )
     if not is_valid:
-        print(f"[Security] Collection validation failed: {error}")
+        print(f"[Security] Crate validation failed: {error}")
         sys.exit(1)
 
     print("=" * 70)
     print("[IsoCrates] THREE-TIER AUTONOMOUS DOCUMENTATION GENERATOR")
     print("=" * 70)
     print(f"Repository: {sanitized_url}")
-    if sanitized_collection:
-        print(f"Collection: {sanitized_collection}")
+    if sanitized_crate:
+        print(f"Crate: {sanitized_crate}")
     print()
 
     # Clone repository
@@ -1804,17 +1248,17 @@ Examples:
         sys.exit(1)
 
     # Generate
-    generator = OpenHandsDocGenerator(repo_path, sanitized_url, sanitized_collection)
+    generator = OpenHandsDocGenerator(repo_path, sanitized_url, sanitized_crate)
 
     if args.doc_type == "auto":
-        results = generator.generate_all()
+        results = generator.generate_all(force=args.force)
     else:
         # Single doc mode — run scouts + planner for context, then one writer
         scout_reports = generator._run_scouts()
         blueprint = generator._planner_think(scout_reports)
 
         # Find the requested doc in the blueprint, or build a minimal spec
-        crate_path = f"{sanitized_collection}/{repo_path.name}".strip("/")
+        crate_path = f"{sanitized_crate}/{repo_path.name}".strip("/")
         doc_spec = None
         for doc in blueprint.get("documents", []):
             if doc["doc_type"] == args.doc_type:
@@ -1846,6 +1290,32 @@ Examples:
             doc_spec, blueprint, discovery, scout_reports
         )
         results = {doc_spec["title"]: result}
+
+    # Check for failures and exit with appropriate code.
+    # The worker (backend/worker.py) uses the exit code to determine job status:
+    #   exit 0 → job marked "completed"
+    #   exit 1 → job marked "failed", stderr captured as error_message
+    error_count = sum(
+        1 for r in results.values()
+        if r.get("status") in ("error", "error_fallback")
+    )
+    total_count = len(results)
+
+    if error_count > 0 and error_count == total_count:
+        # All documents failed — hard failure
+        print(f"\n[Error] All {error_count} document(s) failed to generate.", file=sys.stderr)
+        for title, result in results.items():
+            if result.get("status") in ("error", "error_fallback"):
+                print(f"  - {title}: {result.get('error', 'unknown error')}", file=sys.stderr)
+        sys.exit(1)
+
+    if error_count > 0:
+        # Partial failure — some succeeded, some failed. Report but exit 0
+        # so the worker marks the job completed (partial docs are still useful).
+        print(f"\n[Warning] {error_count}/{total_count} document(s) failed:", file=sys.stderr)
+        for title, result in results.items():
+            if result.get("status") in ("error", "error_fallback"):
+                print(f"  - {title}: {result.get('error', 'unknown error')}", file=sys.stderr)
 
     # Final output
     api_url = os.getenv("DOC_API_URL", "http://localhost:8000")

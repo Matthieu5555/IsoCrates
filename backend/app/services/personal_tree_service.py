@@ -41,7 +41,7 @@ class PersonalTreeService:
         doc_ids = {r.document_id for r in refs}
         doc_map: Dict[str, str] = {}
         for doc_id in doc_ids:
-            doc = self.doc_repo.get_by_id(doc_id)
+            doc = self.doc_repo.get_by_id_optional(doc_id)
             if doc:
                 doc_map[doc_id] = doc.title or doc_id
 
@@ -92,14 +92,18 @@ class PersonalTreeService:
             if parent.user_id != user_id:
                 raise ValidationError("Parent folder belongs to a different user", field="parent_id")
 
-        return self.repo.create_folder(user_id, name, parent_id)
+        result = self.repo.create_folder(user_id, name, parent_id)
+        self.db.commit()
+        return result
 
     def delete_folder(self, folder_id: str) -> bool:
         """Delete a personal folder. CASCADE removes children and refs."""
         folder = self.repo.get_folder(folder_id)
         if not folder:
             raise ValidationError(f"Folder not found: {folder_id}", field="folder_id")
-        return self.repo.delete_folder(folder_id)
+        result = self.repo.delete_folder(folder_id)
+        self.db.commit()
+        return result
 
     def move_folder(self, folder_id: str, new_parent_id: Optional[str]) -> PersonalFolder:
         """Move a personal folder to a new parent (or root if None)."""
@@ -118,6 +122,7 @@ class PersonalTreeService:
         result = self.repo.move_folder(folder_id, new_parent_id)
         if not result:
             raise ValidationError(f"Move failed for folder: {folder_id}")
+        self.db.commit()
         return result
 
     def add_document_ref(self, user_id: str, folder_id: str, document_id: str) -> PersonalDocumentRef:
@@ -130,7 +135,7 @@ class PersonalTreeService:
             raise ValidationError("Folder belongs to a different user", field="folder_id")
 
         # Validate document exists
-        doc = self.doc_repo.get_by_id(document_id)
+        doc = self.doc_repo.get_by_id_optional(document_id)
         if not doc:
             raise ValidationError(f"Document not found: {document_id}", field="document_id")
 
@@ -139,14 +144,18 @@ class PersonalTreeService:
         if existing:
             return existing
 
-        return self.repo.create_ref(user_id, folder_id, document_id)
+        result = self.repo.create_ref(user_id, folder_id, document_id)
+        self.db.commit()
+        return result
 
     def remove_ref(self, ref_id: str) -> bool:
         """Remove a document reference."""
         ref = self.repo.get_ref(ref_id)
         if not ref:
             raise ValidationError(f"Reference not found: {ref_id}", field="ref_id")
-        return self.repo.delete_ref(ref_id)
+        result = self.repo.delete_ref(ref_id)
+        self.db.commit()
+        return result
 
     def move_ref(self, ref_id: str, target_folder_id: str) -> PersonalDocumentRef:
         """Move a document reference to a different folder."""
@@ -161,6 +170,7 @@ class PersonalTreeService:
         result = self.repo.move_ref(ref_id, target_folder_id)
         if not result:
             raise ValidationError(f"Move failed for ref: {ref_id}")
+        self.db.commit()
         return result
 
     def _is_descendant(self, ancestor_id: str, candidate_id: str) -> bool:

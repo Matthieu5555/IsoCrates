@@ -1,4 +1,35 @@
+# IsoCrates Docker Compose
+#
+# Quick start (core platform only — no AI generation):
+#   docker compose up
+#
+# Full stack (with AI documentation agent):
+#   docker compose --profile agent up
+#
+# The core platform (PostgreSQL + API + Frontend) starts by default.
+# The agent profile adds the documentation generation pipeline,
+# which requires OPENROUTER_API_KEY and Docker socket access.
+
 services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: isocrates-postgres
+    environment:
+      POSTGRES_USER: isocrates
+      POSTGRES_PASSWORD: isocrates_dev
+      POSTGRES_DB: isocrates
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U isocrates"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   # Backend API (FastAPI)
   backend-api:
     build:
@@ -9,15 +40,21 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/app
-      - ./silverbullet_era/notes:/notes  # Access to legacy notes for migration
     environment:
-      DATABASE_URL: sqlite:////app/isocrates.db
+      # PostgreSQL (default for docker-compose)
+      DATABASE_URL: postgresql://isocrates:isocrates_dev@postgres:5432/isocrates
+      # SQLite alternative (for local development without Docker):
+      # DATABASE_URL: sqlite:///./isocrates.db
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       CORS_ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001"
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-insecure-key-change-me}
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
       LOG_LEVEL: INFO
       LOG_FORMAT: ${LOG_FORMAT:-json}
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   # Frontend (Next.js)
@@ -40,7 +77,15 @@ services:
     restart: unless-stopped
 
   # Documentation Agent (analyzes repos with OpenHands + Claude)
+  # Only starts with: docker compose --profile agent up
+  #
+  # ARCHITECTURE NOTE: The agent container sits idle (tail -f /dev/null) and the
+  # doc-worker executes commands into it via `docker exec`. This pattern keeps the
+  # agent isolated with strict security constraints while allowing the worker to
+  # trigger generation jobs on demand. The trade-off is that doc-worker needs
+  # Docker socket access (/var/run/docker.sock).
   doc-agent:
+    profiles: ["agent"]
     build:
       context: ./agent
       dockerfile: Dockerfile
@@ -95,13 +140,15 @@ services:
     # user: "1000:1000"
 
   # Worker: polls for queued generation jobs and runs the agent
+  # Only starts with: docker compose --profile agent up
   doc-worker:
+    profiles: ["agent"]
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: doc-worker
     environment:
-      DATABASE_URL: sqlite:////app/isocrates.db
+      DATABASE_URL: postgresql://isocrates:isocrates_dev@postgres:5432/isocrates
       AGENT_SCRIPT_PATH: /workspace/openhands_doc.py
       AGENT_MODE: docker
       AGENT_CONTAINER: doc-agent
@@ -116,7 +163,11 @@ services:
     depends_on:
       - backend-api
       - doc-agent
+      - postgres
     restart: unless-stopped
+
+volumes:
+  postgres_data:
 
 networks:
   default:

@@ -36,7 +36,10 @@ def register_user(
     email = email.strip().lower()
     if not email or "@" not in email:
         raise ValidationError("Valid email address required", field="email")
-    if len(password) < 8:
+    # Minimum password length for user registration.
+    # NIST SP 800-63B recommends at least 8 characters.
+    MIN_PASSWORD_LENGTH = 8
+    if len(password) < MIN_PASSWORD_LENGTH:
         raise ValidationError("Password must be at least 8 characters", field="password")
     if not display_name.strip():
         raise ValidationError("Display name required", field="display_name")
@@ -45,12 +48,21 @@ def register_user(
     if existing is not None:
         raise ValidationError("Email already registered", field="email")
 
-    # First user becomes admin
-    user_count = db.query(User).filter(User.email.isnot(None)).count()
+    # First user becomes admin. Use FOR UPDATE to prevent race where two
+    # concurrent registrations both see count=0 and both become admin.
+    user_count = (
+        db.query(User)
+        .filter(User.email.isnot(None))
+        .with_for_update()
+        .count()
+    )
     is_first_user = user_count == 0
     effective_role = "admin" if is_first_user else role
 
-    user_id = str(uuid.uuid4())[:8]
+    # 8 hex chars from UUID4 = 32 bits of randomness, yielding ~4 billion
+    # possible IDs. Sufficient for user-facing short IDs in typical deployments.
+    USER_ID_LENGTH = 8
+    user_id = str(uuid.uuid4())[:USER_ID_LENGTH]
     user = User(
         user_id=user_id,
         display_name=display_name.strip(),

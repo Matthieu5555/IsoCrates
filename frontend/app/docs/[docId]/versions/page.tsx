@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 import { getDocumentVersions } from '@/lib/api/documents';
 import Link from 'next/link';
 import { badgeVariants, buttonVariants, containerVariants, linkVariants, statusBadgeVariants } from '@/lib/styles/button-variants';

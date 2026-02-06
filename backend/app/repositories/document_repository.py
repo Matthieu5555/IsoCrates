@@ -1,32 +1,47 @@
 """Document repository for database operations.
 
 Owns all document query logic including soft-delete filtering.
-Every read query uses _active_query() to exclude soft-deleted documents,
+Every read query uses _base_query() to exclude soft-deleted documents,
 so callers never need to think about the deleted_at column.
 """
 
-from sqlalchemy.orm import Session, Query
+from sqlalchemy.orm import Query
 from sqlalchemy import text, or_
+import sqlalchemy.exc
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from ..models import Document
-from ..schemas.document import DocumentCreate, DocumentUpdate
-from ..services.content_utils import generate_content_preview
+from ..schemas.document import DocumentCreate, DocumentUpdate, SearchResultResponse
+from ..database import is_postgresql
+from ..exceptions import DocumentNotFoundError
+from .base import BaseRepository
+
+# Maximum length of content preview stored alongside each document.
+# 500 chars ≈ 3-4 sentences, enough for meaningful list-view previews
+# without bloating response payloads. Used by create() and update().
+CONTENT_PREVIEW_LENGTH = 500
 
 
-class DocumentRepository:
+def generate_content_preview(content: str) -> str:
+    """Generate a preview excerpt from document content."""
+    if len(content) <= CONTENT_PREVIEW_LENGTH:
+        return content
+    return content[:CONTENT_PREVIEW_LENGTH]
+
+
+class DocumentRepository(BaseRepository[Document]):
     """Repository for document CRUD operations.
 
-    All read methods automatically exclude soft-deleted documents.
-    Use get_deleted() to access the trash, and soft_delete/restore/permanent_delete
-    for lifecycle management.
+    All read methods automatically exclude soft-deleted documents via
+    _base_query().  Use get_deleted() to access the trash, and
+    soft_delete/restore/permanent_delete for lifecycle management.
     """
 
-    def __init__(self, db: Session):
-        self.db = db
+    model_class = Document
+    not_found_error = DocumentNotFoundError
 
-    def _active_query(self) -> Query:
-        """Base query that excludes soft-deleted documents."""
+    def _base_query(self) -> Query:
+        """Exclude soft-deleted documents from all default queries."""
         return self.db.query(Document).filter(Document.deleted_at.is_(None))
 
     @staticmethod
@@ -67,13 +82,12 @@ class DocumentRepository:
             generation_count=1
         )
         self.db.add(db_document)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(db_document)
         return db_document
 
-    def get_by_id(self, doc_id: str) -> Optional[Document]:
-        """Get active (non-deleted) document by ID."""
-        return self._active_query().filter(Document.id == doc_id).first()
+    # get_by_id and get_by_id_optional are inherited from BaseRepository
+    # and use _base_query(), so they automatically exclude soft-deleted docs.
 
     def get_by_id_including_deleted(self, doc_id: str) -> Optional[Document]:
         """Get document by ID regardless of soft-delete status."""
@@ -81,7 +95,7 @@ class DocumentRepository:
 
     def get_by_repo_and_type(self, repo_url: str, doc_type: str) -> Optional[Document]:
         """Get active document by repository URL and type."""
-        return self._active_query().filter(
+        return self._base_query().filter(
             Document.repo_url == repo_url,
             Document.doc_type == doc_type
         ).first()
@@ -100,7 +114,7 @@ class DocumentRepository:
         prefixes are returned.  This pushes permission filtering into SQL so
         pagination counts are accurate.
         """
-        query = self._active_query()
+        query = self._base_query()
         if path_prefix:
             query = query.filter(
                 (Document.path == path_prefix) |
@@ -117,7 +131,7 @@ class DocumentRepository:
     def get_tracked_repo_urls(self) -> List[str]:
         """Get distinct repo_url values from active documents."""
         rows = (
-            self._active_query()
+            self._base_query()
             .filter(Document.repo_url.isnot(None), Document.repo_url != "")
             .with_entities(Document.repo_url)
             .distinct()
@@ -125,17 +139,15 @@ class DocumentRepository:
         )
         return [row[0] for row in rows]
 
-    def update(self, doc_id: str, document: DocumentUpdate) -> Optional[Document]:
-        """Update document content."""
+    def update(self, doc_id: str, document: DocumentUpdate) -> Document:
+        """Update document content. Raises DocumentNotFoundError."""
         db_document = self.get_by_id(doc_id)
-        if not db_document:
-            return None
-
         db_document.content = document.content
         db_document.content_preview = generate_content_preview(document.content)
         db_document.generation_count += 1
+        db_document.version = (db_document.version or 0) + 1
 
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(db_document)
         return db_document
 
@@ -146,7 +158,6 @@ class DocumentRepository:
             return False
 
         self.db.delete(db_document)
-        self.db.commit()
         return True
 
     def soft_delete(self, doc_id: str) -> bool:
@@ -157,18 +168,17 @@ class DocumentRepository:
 
         if db_document.deleted_at is None:
             db_document.deleted_at = datetime.now(timezone.utc)
-            self.db.commit()
         return True
 
-    def restore(self, doc_id: str) -> Optional[Document]:
-        """Restore a soft-deleted document. Idempotent — returns doc even if not deleted."""
+    def restore(self, doc_id: str) -> Document:
+        """Restore a soft-deleted document. Raises DocumentNotFoundError. Idempotent if not deleted."""
         db_document = self.db.query(Document).filter(Document.id == doc_id).first()
         if not db_document:
-            return None
+            raise DocumentNotFoundError(doc_id)
 
         if db_document.deleted_at is not None:
             db_document.deleted_at = None
-            self.db.commit()
+            self.db.flush()
             self.db.refresh(db_document)
         return db_document
 
@@ -179,7 +189,6 @@ class DocumentRepository:
             return True  # Already gone — idempotent
 
         self.db.delete(db_document)
-        self.db.commit()
         return True
 
     def get_deleted(self, skip: int = 0, limit: int = 100, allowed_prefixes: Optional[list[str]] = None) -> List[Document]:
@@ -206,13 +215,11 @@ class DocumentRepository:
         count = len(expired)
         for doc in expired:
             self.db.delete(doc)
-        if count > 0:
-            self.db.commit()
         return count
 
     def search(self, query: str, limit: int = 20, allowed_prefixes: Optional[list[str]] = None) -> List[Document]:
         """Simple LIKE search fallback (excludes soft-deleted)."""
-        q = self._active_query().filter(Document.content.contains(query))
+        q = self._base_query().filter(Document.content.contains(query))
         if allowed_prefixes is not None:
             grant_filter = self._grant_filter(allowed_prefixes)
             if grant_filter is not None:
@@ -228,18 +235,103 @@ class DocumentRepository:
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
         allowed_prefixes: Optional[list[str]] = None,
-    ) -> list[dict]:
-        """Full-text search using FTS5 with ranking and snippets.
+    ) -> list[SearchResultResponse]:
+        """Full-text search with ranking and snippets.
 
-        Returns dicts with keys: id, title, path, doc_type, keywords, repo_name,
-        content_preview, updated_at, generation_count, rank, snippet.
-        Falls back to LIKE search if FTS5 table doesn't exist.
+        Uses PostgreSQL tsvector/tsquery or SQLite FTS5 depending on database.
+        Falls back to LIKE search if FTS is not available.
         """
+        if is_postgresql():
+            return self._search_fts_postgresql(
+                query, limit, path_prefix, keywords, date_from, date_to, allowed_prefixes
+            )
+        else:
+            return self._search_fts_sqlite(
+                query, limit, path_prefix, keywords, date_from, date_to, allowed_prefixes
+            )
+
+    def _search_fts_postgresql(
+        self,
+        query: str,
+        limit: int,
+        path_prefix: Optional[str],
+        keywords: Optional[list],
+        date_from: Optional[datetime],
+        date_to: Optional[datetime],
+        allowed_prefixes: Optional[list[str]],
+    ) -> list[SearchResultResponse]:
+        """PostgreSQL full-text search using tsvector/tsquery."""
+        try:
+            # Build PostgreSQL tsquery - convert space-separated terms to AND query
+            search_query = query.strip()
+            if search_query and not any(c in search_query for c in ['&', '|', '!', ':']):
+                # Convert simple query to tsquery format with prefix matching
+                terms = search_query.split()
+                search_query = ' & '.join(f"{t}:*" for t in terms if t)
+
+            sql = """
+                SELECT
+                    d.id, d.title, d.path, d.doc_type, d.keywords, d.repo_name,
+                    d.content_preview, d.updated_at, d.generation_count,
+                    ts_rank(to_tsvector('english', COALESCE(d.title, '') || ' ' || COALESCE(d.content, '')),
+                            to_tsquery('english', :query)) as rank,
+                    ts_headline('english', COALESCE(d.content, ''),
+                               to_tsquery('english', :query),
+                               'StartSel=<mark>, StopSel=</mark>, MaxWords=40, MinWords=20') as snippet
+                FROM documents d
+                WHERE to_tsvector('english', COALESCE(d.title, '') || ' ' || COALESCE(d.content, ''))
+                      @@ to_tsquery('english', :query)
+                AND d.deleted_at IS NULL
+            """
+            params: dict = {"query": search_query, "limit": limit}
+
+            if path_prefix:
+                sql += " AND (d.path = :path_prefix OR d.path LIKE :path_like)"
+                params["path_prefix"] = path_prefix
+                params["path_like"] = f"{path_prefix}/%"
+
+            if allowed_prefixes is not None and "" not in allowed_prefixes:
+                if not allowed_prefixes:
+                    return []
+                grant_clauses = []
+                for i, prefix in enumerate(allowed_prefixes):
+                    grant_clauses.append(f"(d.path = :gp_exact_{i} OR d.path LIKE :gp_like_{i})")
+                    params[f"gp_exact_{i}"] = prefix
+                    params[f"gp_like_{i}"] = f"{prefix}/%"
+                sql += f" AND ({' OR '.join(grant_clauses)})"
+
+            if date_from:
+                sql += " AND d.updated_at >= :date_from"
+                params["date_from"] = date_from
+
+            if date_to:
+                sql += " AND d.updated_at <= :date_to"
+                params["date_to"] = date_to
+
+            sql += " ORDER BY rank DESC LIMIT :limit"
+
+            rows = self.db.execute(text(sql), params).fetchall()
+            return self._process_fts_results(rows, keywords)
+
+        except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError):
+            # Fall back to LIKE search
+            return self._fallback_like_search(query, limit, allowed_prefixes)
+
+    def _search_fts_sqlite(
+        self,
+        query: str,
+        limit: int,
+        path_prefix: Optional[str],
+        keywords: Optional[list],
+        date_from: Optional[datetime],
+        date_to: Optional[datetime],
+        allowed_prefixes: Optional[list[str]],
+    ) -> list[SearchResultResponse]:
+        """SQLite FTS5 full-text search."""
         try:
             # Build FTS5 query with prefix matching
             fts_query = query.strip()
             if fts_query and not any(c in fts_query for c in ['"', '*', 'OR', 'AND', 'NOT']):
-                # Add prefix matching for simple queries
                 terms = fts_query.split()
                 fts_query = ' '.join(f'"{t}"*' for t in terms if t)
 
@@ -263,7 +355,7 @@ class DocumentRepository:
 
             if allowed_prefixes is not None and "" not in allowed_prefixes:
                 if not allowed_prefixes:
-                    return []  # no grants → no results
+                    return []
                 grant_clauses = []
                 for i, prefix in enumerate(allowed_prefixes):
                     p_exact = f":gp_exact_{i}"
@@ -284,60 +376,80 @@ class DocumentRepository:
             sql += " ORDER BY rank LIMIT :limit"
 
             rows = self.db.execute(text(sql), params).fetchall()
+            return self._process_fts_results(rows, keywords)
 
-            results = []
-            for row in rows:
-                kw = row[4]
-                if isinstance(kw, str):
-                    import json
-                    try:
-                        kw = json.loads(kw)
-                    except (json.JSONDecodeError, TypeError):
-                        kw = []
-
-                # Apply keyword filter in Python (simpler than SQL JSON filtering)
-                if keywords:
-                    if not any(k in (kw or []) for k in keywords):
-                        continue
-
-                results.append({
-                    "id": row[0],
-                    "title": row[1],
-                    "path": row[2],
-                    "doc_type": row[3] or "",
-                    "keywords": kw or [],
-                    "repo_name": row[5],
-                    "content_preview": row[6],
-                    "updated_at": row[7],
-                    "generation_count": row[8],
-                    "rank": row[9],
-                    "snippet": row[10],
-                })
-            return results
-
-        except Exception:
+        except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError):
             # FTS5 table may not exist yet — fall back to LIKE search
-            docs = self.search(query, limit, allowed_prefixes=allowed_prefixes)
-            return [
-                {
-                    "id": d.id,
-                    "title": d.title,
-                    "path": d.path,
-                    "doc_type": d.doc_type or "",
-                    "keywords": d.keywords or [],
-                    "repo_name": d.repo_name,
-                    "content_preview": d.content_preview,
-                    "updated_at": d.updated_at,
-                    "generation_count": d.generation_count,
-                    "rank": 0.0,
-                    "snippet": None,
-                }
-                for d in docs
-            ]
+            return self._fallback_like_search(query, limit, allowed_prefixes)
+
+    def _process_fts_results(self, rows, keywords: Optional[list]) -> list[SearchResultResponse]:
+        """Process FTS result rows into typed response objects.
+
+        Both PostgreSQL and SQLite FTS queries SELECT the same column order:
+        id, title, path, doc_type, keywords, repo_name, content_preview,
+        updated_at, generation_count, rank, snippet.
+        """
+        import json
+
+        results: list[SearchResultResponse] = []
+        for row in rows:
+            # Columns are positional from the SELECT clause — named for clarity
+            doc_id, title, path, doc_type, raw_keywords, repo_name = row[0], row[1], row[2], row[3], row[4], row[5]
+            content_preview, updated_at, generation_count, rank, snippet = row[6], row[7], row[8], row[9], row[10]
+
+            # Keywords may come as JSON string (SQLite) or native list (PostgreSQL)
+            doc_keywords = raw_keywords
+            if isinstance(doc_keywords, str):
+                try:
+                    doc_keywords = json.loads(doc_keywords)
+                except (json.JSONDecodeError, TypeError):
+                    doc_keywords = []
+
+            # Apply keyword filter in Python (simpler than SQL JSON filtering)
+            if keywords:
+                if not any(k in (doc_keywords or []) for k in keywords):
+                    continue
+
+            results.append(SearchResultResponse(
+                id=doc_id,
+                title=title,
+                path=path,
+                doc_type=doc_type or "",
+                keywords=doc_keywords or [],
+                repo_name=repo_name,
+                content_preview=content_preview,
+                updated_at=updated_at,
+                generation_count=generation_count,
+                rank=rank,
+                snippet=snippet,
+            ))
+        return results
+
+    def _fallback_like_search(
+        self, query: str, limit: int, allowed_prefixes: Optional[list[str]]
+    ) -> list[SearchResultResponse]:
+        """Fallback to LIKE search when FTS is unavailable."""
+        docs = self.search(query, limit, allowed_prefixes=allowed_prefixes)
+        return [
+            SearchResultResponse(
+                id=d.id,
+                title=d.title,
+                path=d.path,
+                doc_type=d.doc_type or "",
+                keywords=d.keywords or [],
+                repo_name=d.repo_name,
+                content_preview=d.content_preview,
+                updated_at=d.updated_at,
+                generation_count=d.generation_count,
+                rank=0.0,
+                snippet=None,
+            )
+            for d in docs
+        ]
 
     def get_recent(self, limit: int = 20, allowed_prefixes: Optional[list[str]] = None) -> List[Document]:
         """Get most recently updated active documents."""
-        query = self._active_query()
+        query = self._base_query()
         if allowed_prefixes is not None:
             grant_filter = self._grant_filter(allowed_prefixes)
             if grant_filter is not None:
@@ -346,7 +458,7 @@ class DocumentRepository:
 
     def move_folder(self, source_path: str, target_path: str) -> int:
         """Move folder by updating path prefixes (active docs only)."""
-        affected_docs = self._active_query().filter(
+        affected_docs = self._base_query().filter(
             (Document.path == source_path) |
             (Document.path.like(f"{source_path}/%"))
         ).all()
@@ -358,5 +470,4 @@ class DocumentRepository:
                 relative_path = doc.path[len(source_path) + 1:]
                 doc.path = f"{target_path}/{relative_path}"
 
-        self.db.commit()
         return len(affected_docs)

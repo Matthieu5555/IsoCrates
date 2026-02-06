@@ -10,6 +10,7 @@ import { Table } from '@tiptap/extension-table';
 import { TableRow } from '@tiptap/extension-table-row';
 import { TableCell } from '@tiptap/extension-table-cell';
 import { TableHeader } from '@tiptap/extension-table-header';
+import Link from '@tiptap/extension-link';
 import { Markdown } from 'tiptap-markdown';
 import { EditorToolbar } from './EditorToolbar';
 import { WikilinkExtension } from './extensions/WikilinkExtension';
@@ -65,6 +66,13 @@ export function MarkdownEditor({ content, onChange, placeholder, fullScreen }: M
       TableHeader,
       Placeholder.configure({
         placeholder: placeholder ?? 'Start writing...',
+      }),
+      Link.configure({
+        openOnClick: false,
+        HTMLAttributes: {
+          target: '_blank',
+          rel: 'noopener noreferrer',
+        },
       }),
       WikilinkExtension.configure({
         onWikilinkClick: handleWikilinkClick,
@@ -127,6 +135,8 @@ export function MarkdownEditor({ content, onChange, placeholder, fullScreen }: M
         .ProseMirror th { background: hsl(var(--muted)); font-weight: 600; }
         .ProseMirror .selectedCell { background: hsl(var(--accent) / 0.3); }
         .ProseMirror .column-resize-handle { position: absolute; right: -2px; top: 0; bottom: 0; width: 4px; background: hsl(var(--primary)); cursor: col-resize; }
+        .ProseMirror a[href^="http"] { text-decoration: underline; cursor: pointer; }
+        .ProseMirror a[href^="http"]::after { content: ' ↗'; font-size: 0.75em; opacity: 0.5; }
       `}</style>
       <div className={`overflow-y-auto ${fullScreen ? 'flex-1' : ''}`}>
         <EditorContent editor={editor} />

@@ -1,16 +1,19 @@
 """Repository for folder metadata database operations."""
 
-from sqlalchemy.orm import Session
 from typing import List, Optional
 from ..models.folder_metadata import FolderMetadata
 from ..schemas.folder import FolderMetadataCreate, FolderMetadataUpdate
+from ..exceptions import FolderNotFoundError
+from .base import BaseRepository
 
 
-class FolderMetadataRepository:
+class FolderMetadataRepository(BaseRepository[FolderMetadata]):
     """Data access layer for folder metadata."""
 
-    def __init__(self, db: Session):
-        self.db = db
+    model_class = FolderMetadata
+    not_found_error = FolderNotFoundError
+
+    # get_by_id and get_by_id_optional are inherited from BaseRepository.
 
     def create(self, folder_id: str, data: FolderMetadataCreate) -> FolderMetadata:
         """Create new folder metadata."""
@@ -22,13 +25,9 @@ class FolderMetadataRepository:
             sort_order=data.sort_order
         )
         self.db.add(folder)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(folder)
         return folder
-
-    def get_by_id(self, folder_id: str) -> Optional[FolderMetadata]:
-        """Get folder metadata by ID."""
-        return self.db.query(FolderMetadata).filter(FolderMetadata.id == folder_id).first()
 
     def get_by_path(self, path: str) -> Optional[FolderMetadata]:
         """Get folder metadata by full path."""
@@ -41,12 +40,9 @@ class FolderMetadataRepository:
             FolderMetadata.path
         ).all()
 
-    def update(self, folder_id: str, data: FolderMetadataUpdate) -> Optional[FolderMetadata]:
-        """Update folder metadata."""
+    def update(self, folder_id: str, data: FolderMetadataUpdate) -> FolderMetadata:
+        """Update folder metadata. Raises FolderNotFoundError."""
         folder = self.get_by_id(folder_id)
-        if not folder:
-            return None
-
         if data.description is not None:
             folder.description = data.description
         if data.icon is not None:
@@ -54,18 +50,14 @@ class FolderMetadataRepository:
         if data.sort_order is not None:
             folder.sort_order = data.sort_order
 
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(folder)
         return folder
 
     def delete(self, folder_id: str) -> bool:
-        """Delete folder metadata."""
+        """Delete folder metadata. Raises FolderNotFoundError."""
         folder = self.get_by_id(folder_id)
-        if not folder:
-            return False
-
         self.db.delete(folder)
-        self.db.commit()
         return True
 
     def cleanup_orphans(self, existing_paths: set) -> int:
@@ -77,8 +69,5 @@ class FolderMetadataRepository:
         count = len(orphans)
         for orphan in orphans:
             self.db.delete(orphan)
-
-        if count > 0:
-            self.db.commit()
 
         return count

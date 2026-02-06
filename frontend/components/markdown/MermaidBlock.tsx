@@ -35,7 +35,7 @@ function cssVarToHex(varName: string, fallback: string): string {
 
 function getMermaidConfig() {
   if (typeof document === 'undefined') {
-    return { theme: 'default' as const, securityLevel: 'strict' as const, startOnLoad: false };
+    return { theme: 'default' as const, securityLevel: 'strict' as const, startOnLoad: false, suppressErrorRendering: true };
   }
 
   const isDark = document.documentElement.classList.contains('dark');
@@ -46,6 +46,7 @@ function getMermaidConfig() {
       startOnLoad: false,
       theme: 'base' as const,
       securityLevel: 'strict' as const,
+      suppressErrorRendering: true,
       themeVariables: {
         primaryColor: cssVarToHex('--primary', '#6366f1'),
         primaryTextColor: cssVarToHex('--primary-foreground', '#ffffff'),
@@ -65,6 +66,7 @@ function getMermaidConfig() {
     startOnLoad: false,
     theme: isDark ? 'dark' as const : 'default' as const,
     securityLevel: 'strict' as const,
+    suppressErrorRendering: true,
   };
 }
 
@@ -93,6 +95,9 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
         const mermaid = (await import('mermaid')).default;
         mermaid.initialize(getMermaidConfig());
 
+        // Pre-validate syntax to catch errors before rendering
+        await mermaid.parse(chart.trim());
+
         const { svg } = await mermaid.render(id, chart.trim());
         if (!cancelled && containerRef.current) {
           containerRef.current.innerHTML = svg;
@@ -113,8 +118,28 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
 
   if (error) {
     return (
-      <div className="rounded-md border border-border bg-muted/50 p-3 text-xs text-muted-foreground">
-        <span>Diagram could not be rendered</span>
+      <div className="my-4 rounded-md border border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30">
+        <div className="flex items-center gap-2 border-b border-amber-200 px-3 py-2 dark:border-amber-900">
+          <svg className="h-4 w-4 text-amber-600 dark:text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <span className="text-sm font-medium text-amber-800 dark:text-amber-200">
+            Diagram syntax error
+          </span>
+        </div>
+        <div className="px-3 py-2">
+          <p className="text-xs text-amber-700 dark:text-amber-300 font-mono whitespace-pre-wrap">
+            {error}
+          </p>
+        </div>
+        <details className="border-t border-amber-200 dark:border-amber-900">
+          <summary className="cursor-pointer px-3 py-2 text-xs text-amber-600 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/30">
+            Show source
+          </summary>
+          <pre className="max-h-40 overflow-auto bg-amber-100/50 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+            <code>{chart}</code>
+          </pre>
+        </details>
       </div>
     );
   }

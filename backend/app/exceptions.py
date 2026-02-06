@@ -20,6 +20,9 @@ class ErrorCode(str, Enum):
     CIRCULAR_DEPENDENCY = "CIRCULAR_DEPENDENCY"
     SELF_DEPENDENCY = "SELF_DEPENDENCY"
 
+    # Folder errors
+    FOLDER_NOT_FOUND = "FOLDER_NOT_FOUND"
+
     # Validation errors
     VALIDATION_ERROR = "VALIDATION_ERROR"
 
@@ -33,6 +36,9 @@ class ErrorCode(str, Enum):
     UNAUTHORIZED = "UNAUTHORIZED"
     FORBIDDEN = "FORBIDDEN"
     RATE_LIMITED = "RATE_LIMITED"
+
+    # Concurrency errors
+    CONFLICT = "CONFLICT"
 
     # Generic errors
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -109,6 +115,18 @@ class VersionNotFoundError(IsoException):
         )
 
 
+class FolderNotFoundError(IsoException):
+    """Folder not found in database."""
+
+    def __init__(self, folder_id: str):
+        super().__init__(
+            f"Folder not found: {folder_id}",
+            ErrorCode.FOLDER_NOT_FOUND,
+            status_code=404,
+            details={"folder_id": folder_id}
+        )
+
+
 class ValidationError(IsoException):
     """Validation failed for user input."""
 
@@ -176,6 +194,18 @@ class ForbiddenError(IsoException):
             message,
             ErrorCode.FORBIDDEN,
             status_code=403,
+        )
+
+
+class ConflictError(IsoException):
+    """Update conflicts with a concurrent modification."""
+
+    def __init__(self, doc_id: str, message: str = "Document was modified by another user"):
+        super().__init__(
+            message,
+            ErrorCode.CONFLICT,
+            status_code=409,
+            details={"doc_id": doc_id}
         )
 
 

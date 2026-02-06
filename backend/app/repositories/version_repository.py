@@ -1,23 +1,25 @@
 """Version repository for database operations."""
 
-from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 from ..models import Version
 from ..schemas.version import VersionCreate
+from ..exceptions import VersionNotFoundError
+from .base import BaseRepository
 
 
-class VersionRepository:
+class VersionRepository(BaseRepository[Version]):
     """Repository for version CRUD operations."""
 
-    def __init__(self, db: Session):
-        self.db = db
+    model_class = Version
+    id_column = "version_id"
+    not_found_error = VersionNotFoundError
 
     def create(self, version: VersionCreate) -> Version:
         """Create a new version."""
         # Generate version ID: {doc_id}-{timestamp}
-        timestamp = datetime.utcnow().isoformat().replace(':', '-').replace('.', '-')
+        timestamp = datetime.now(timezone.utc).isoformat().replace(':', '-').replace('.', '-')
         version_id = f"{version.doc_id}-{timestamp}"
 
         # Calculate content hash (SHA256)
@@ -32,13 +34,12 @@ class VersionRepository:
             author_metadata=version.author_metadata
         )
         self.db.add(db_version)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(db_version)
         return db_version
 
-    def get_by_id(self, version_id: str) -> Optional[Version]:
-        """Get version by ID."""
-        return self.db.query(Version).filter(Version.version_id == version_id).first()
+    # get_by_id and get_by_id_optional are inherited from BaseRepository
+    # with id_column="version_id".
 
     def get_by_document(self, doc_id: str, skip: int = 0, limit: int = 50) -> List[Version]:
         """Get all versions for a document."""

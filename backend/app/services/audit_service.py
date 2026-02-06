@@ -10,8 +10,10 @@ Usage in service layer:
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import sqlalchemy.exc
 from sqlalchemy.orm import Session
 
 from ..models.user import AuditLog
@@ -40,7 +42,7 @@ def log(
         )
         db.add(entry)
         db.commit()
-    except Exception as e:
+    except sqlalchemy.exc.SQLAlchemyError as e:
         logger.warning("Failed to write audit log: %s", e)
         db.rollback()
 
@@ -75,3 +77,22 @@ def get_by_resource(db: Session, resource_type: str, resource_id: str, limit: in
         .limit(limit)
         .all()
     )
+
+
+def purge_old_entries(db: Session, days: int = 365) -> int:
+    """Delete audit log entries older than `days`. Returns count of deleted rows.
+
+    Skipped when days <= 0 (keep forever). Never raises — logs failures.
+    """
+    if days <= 0:
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    try:
+        count = db.query(AuditLog).filter(AuditLog.created_at < cutoff).delete()
+        db.commit()
+        return count
+    except sqlalchemy.exc.SQLAlchemyError as e:
+        logger.warning("Failed to purge audit log: %s", e)
+        db.rollback()
+        return 0

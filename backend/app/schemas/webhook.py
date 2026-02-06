@@ -12,6 +12,11 @@ class WebhookResponse(BaseModel):
     message: str
 
 
+class ManualJobRequest(BaseModel):
+    """Request to manually trigger documentation generation."""
+    repo_url: str
+
+
 class GenerationJobResponse(BaseModel):
     """Schema for generation job status."""
     id: str

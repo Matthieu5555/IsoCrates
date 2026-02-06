@@ -112,13 +112,12 @@ class TestFallbackPlan:
     def test_small_repo(self, generator):
         gen, _, workspace, _ = generator
 
-        with patch("openhands_doc.subprocess.run") as mock_run:
-            # Simulate 5 source files
-            mock_run.return_value = MagicMock(stdout="a.py\nb.py\nc.py\nd.py\ne.py", returncode=0)
-            result = gen._fallback_plan("test/repo")
+        # Mock the planner's get_repo_metrics callback to return small repo
+        gen.planner._get_repo_metrics = lambda: {"size_label": "small"}
+        result = gen._fallback_plan("test/repo")
 
         assert result["complexity"] == "small"
-        assert len(result["documents"]) == 4  # core pages only
+        assert len(result["documents"]) == 5  # core pages: overview, capabilities, quickstart, architecture, api
         # All pages should have wikilinks_out
         for doc in result["documents"]:
             assert "wikilinks_out" in doc
@@ -127,14 +126,12 @@ class TestFallbackPlan:
     def test_large_repo(self, generator):
         gen, _, workspace, _ = generator
 
-        with patch("openhands_doc.subprocess.run") as mock_run:
-            # Simulate 60 source files
-            lines = "\n".join(f"file{i}.py" for i in range(60))
-            mock_run.return_value = MagicMock(stdout=lines, returncode=0)
-            result = gen._fallback_plan("test/repo")
+        # Mock the planner's get_repo_metrics callback to return large repo
+        gen.planner._get_repo_metrics = lambda: {"size_label": "large"}
+        result = gen._fallback_plan("test/repo")
 
         assert result["complexity"] == "large"
-        assert len(result["documents"]) == 8  # core + medium + large pages
+        assert len(result["documents"]) == 9  # core 5 + medium 2 (config, guide) + large 2 (data-model, contributing)
         # Should have nested paths
         paths = [d["path"] for d in result["documents"]]
         assert any("/" in p.replace("test/repo", "") for p in paths), (

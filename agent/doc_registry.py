@@ -8,7 +8,6 @@ frontmatter, and we maintain a registry for fast lookups.
 """
 
 import json
-import hashlib
 from pathlib import Path
 from typing import Optional, Dict, List
 from datetime import datetime
@@ -19,18 +18,11 @@ REGISTRY_FILE = Path("/notes/.doc_registry.json")
 
 
 def generate_doc_id(repo_url: str, path: str = "", title: str = "", doc_type: str = "") -> str:
-    """
-    Generate a unique, stable ID for a document.
+    """Generate a unique, stable ID for a document.
 
-    ⚠️  WARNING: This duplicates logic from backend/app/services/document_service.py
-        If you change hash lengths or algorithm, update BOTH places!
-        TODO: Extract to shared library or make agent call backend API
-
-    New format: doc-{repo_hash}-{path_hash}
-    Example: doc-a1b2c3d4-e5f6g7h8
-
-    Legacy format: doc-{repo_hash}-{type}
-    Example: doc-a1b2c3d4-client
+    Delegates to DocumentAPIClient.generate_doc_id() which calls the backend
+    API (POST /api/docs/generate-id) — the single source of truth.
+    Falls back to a local implementation when the API is unreachable.
 
     Args:
         repo_url: Repository URL
@@ -41,24 +33,9 @@ def generate_doc_id(repo_url: str, path: str = "", title: str = "", doc_type: st
     Returns:
         Unique document ID
     """
-    # Hash lengths - MUST MATCH backend/app/services/document_service.py constants!
-    DOC_ID_REPO_HASH_LENGTH = 12  # Collision-resistant for ~10M repos
-    DOC_ID_PATH_HASH_LENGTH = 12  # Combined with repo = 24-char unique ID
-
-    repo_hash = hashlib.sha256(repo_url.encode()).hexdigest()[:DOC_ID_REPO_HASH_LENGTH]
-
-    # Use path + title for new hierarchical docs
-    if path or title:
-        full_path = f"{path}/{title}" if path else title
-        path_hash = hashlib.sha256(full_path.encode()).hexdigest()[:DOC_ID_PATH_HASH_LENGTH]
-        return f"doc-{repo_hash}-{path_hash}"
-
-    # Legacy fallback: use doc_type
-    if doc_type:
-        return f"doc-{repo_hash}-{doc_type}"
-
-    # Default fallback
-    return f"doc-{repo_hash}-default"
+    from api_client import DocumentAPIClient
+    client = DocumentAPIClient()
+    return client.generate_doc_id(repo_url, path, title, doc_type)
 
 
 def parse_frontmatter(content: str) -> tuple[Optional[Dict], str]:
