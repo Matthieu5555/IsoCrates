@@ -826,7 +826,7 @@ OUTPUT:
 
         except Exception as e:
             logger.error("Generation failed: %s", e, exc_info=True)
-            return {"status": "error", "error": str(e), "resolved_from": resolved_from}
+            return {"status": "error", "doc_id": doc_id, "error": str(e), "resolved_from": resolved_from}
 
     # ------------------------------------------------------------------
     # Parallel writer support (delegated to WriterPool)

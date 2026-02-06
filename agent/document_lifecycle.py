@@ -291,6 +291,11 @@ class DocumentLifecycle:
     ) -> dict:
         """Delete orphaned AI-generated docs, preserving human-edited ones.
 
+        SAFETY: Cleanup is skipped entirely when fewer than half of the
+        attempted documents succeeded.  This prevents a failed generation
+        run (bad API key, network outage, model error) from wiping out
+        an entire documentation set.
+
         Returns a dict with *deleted*, *preserved_human*,
         *preserved_user_organized*, *preserved_failed*, *errors* counts.
         """
@@ -298,6 +303,20 @@ class DocumentLifecycle:
 
         if not snapshot["doc_ids"]:
             print("[Cleanup] No snapshot — skipping orphan cleanup")
+            return result
+
+        # Circuit breaker: refuse to delete when the generation run
+        # mostly failed.  A bad model config, revoked API key, or
+        # network blip must NEVER destroy existing documentation.
+        total_attempted = len(generated_ids) + len(failed_ids)
+        if total_attempted == 0:
+            print("[Cleanup] SAFETY: No documents were attempted — skipping orphan cleanup entirely")
+            return result
+
+        success_rate = len(generated_ids) / total_attempted
+        if success_rate < 0.5:
+            print(f"[Cleanup] SAFETY: Only {len(generated_ids)}/{total_attempted} documents succeeded "
+                  f"({success_rate:.0%}) — skipping orphan cleanup to protect existing docs")
             return result
 
         orphans = snapshot["doc_ids"] - generated_ids - failed_ids
