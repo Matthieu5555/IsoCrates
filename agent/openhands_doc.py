@@ -70,6 +70,7 @@ from prompts import (
     WIKILINK_REQUIREMENTS,
     DESCRIPTION_REQUIREMENTS,
     SELF_CONTAINED_REQUIREMENTS,
+    SOURCE_CITATION_REQUIREMENTS,
 )
 
 # Document registry for ID-based tracking
@@ -498,6 +499,8 @@ PRE-DIGESTED INTELLIGENCE (from repository scouts — filtered for this page):
 {DESCRIPTION_REQUIREMENTS}
 
 {SELF_CONTAINED_REQUIREMENTS}
+
+{SOURCE_CITATION_REQUIREMENTS}
 
 {doc_context}
 

@@ -85,11 +85,14 @@ class IsoCratesClient:
         query: str,
         path_prefix: Optional[str] = None,
         limit: int = 10,
+        keywords: Optional[list[str]] = None,
     ) -> list[dict[str, Any]]:
         """Full-text search. Maps to GET /api/docs/search/."""
         params: dict[str, str | int] = {"q": query, "limit": limit}
         if path_prefix:
             params["path_prefix"] = path_prefix
+        if keywords:
+            params["keywords"] = ",".join(keywords)
         resp = await self._request_with_retry("GET", "/api/docs/search/", params=params)
         return resp.json()
 
@@ -168,6 +171,65 @@ class IsoCratesClient:
         """Find documents similar to arbitrary text. Maps to GET /api/docs/similar/."""
         resp = await self._request_with_retry(
             "GET", "/api/docs/similar/", params={"text": text, "limit": limit},
+        )
+        return resp.json()
+
+    async def get_latest_version(self, doc_id: str) -> dict[str, Any]:
+        """Get latest version metadata. Maps to GET /api/docs/{doc_id}/versions/latest."""
+        resp = await self._request_with_retry(
+            "GET", f"/api/docs/{doc_id}/versions/latest",
+        )
+        return resp.json()
+
+    async def create_document(
+        self,
+        title: str,
+        path: str,
+        content: str,
+        description: Optional[str] = None,
+        repo_url: Optional[str] = None,
+        repo_name: Optional[str] = None,
+        keywords: Optional[list[str]] = None,
+        author_type: str = "human",
+        author_metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Create or update a document (upsert). Maps to POST /api/docs."""
+        payload: dict[str, Any] = {
+            "title": title,
+            "path": path,
+            "content": content,
+            "author_type": author_type,
+            "author_metadata": author_metadata or {"source": "mcp"},
+        }
+        if description is not None:
+            payload["description"] = description
+        if repo_url is not None:
+            payload["repo_url"] = repo_url
+        if repo_name is not None:
+            payload["repo_name"] = repo_name
+        if keywords is not None:
+            payload["keywords"] = keywords
+        resp = await self._request_with_retry("POST", "/api/docs", json=payload)
+        return resp.json()
+
+    async def update_document(
+        self,
+        doc_id: str,
+        content: str,
+        description: Optional[str] = None,
+        author_type: str = "human",
+        author_metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Update a document's content. Maps to PUT /api/docs/{doc_id}."""
+        payload: dict[str, Any] = {
+            "content": content,
+            "author_type": author_type,
+            "author_metadata": author_metadata or {"source": "mcp"},
+        }
+        if description is not None:
+            payload["description"] = description
+        resp = await self._request_with_retry(
+            "PUT", f"/api/docs/{doc_id}", json=payload,
         )
         return resp.json()
 

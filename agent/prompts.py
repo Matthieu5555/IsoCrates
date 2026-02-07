@@ -210,6 +210,30 @@ before the opening --- separator. The description MUST be on a single line
 (no line breaks within the value).
 """
 
+SOURCE_CITATION_REQUIREMENTS: str = """
+SOURCE CITATION (MUST include at the bottom, above the bottomatter):
+
+After writing the page content, add a "## Sources" section listing the key
+source files you actually read and used to write this page. Format as a table:
+
+## Sources
+
+| File | Purpose |
+|------|---------|
+| `src/services/document_service.py` | Core CRUD logic and versioning |
+| `src/models/document.py` | SQLAlchemy model and column definitions |
+
+RULES:
+  Only list files you genuinely read and extracted information from — not
+  every file in key_files_to_read. If you read a file but it wasn't useful,
+  omit it. The purpose column should be a brief phrase (not a sentence)
+  explaining what information you took from that file.
+
+  Use relative paths from the repository root. Keep the table compact — 3-10
+  files is typical. This section helps readers trace documentation back to
+  the code it describes.
+"""
+
 SELF_CONTAINED_REQUIREMENTS: str = """
 SELF-CONTAINED PAGES (every page must stand alone):
 

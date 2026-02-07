@@ -108,6 +108,65 @@ def format_similar_results(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def format_provenance(doc_title: str, version: dict) -> str:
+    """Format version metadata showing source file provenance."""
+    meta = version.get("author_metadata") or {}
+    author_type = version.get("author_type", "unknown")
+    created = version.get("created_at", "")
+
+    lines = [f"## Provenance for \"{doc_title}\"\n"]
+    lines.append(f"- **Author type:** {author_type}")
+    lines.append(f"- **Version date:** {created}")
+
+    if meta.get("generator"):
+        lines.append(f"- **Generator:** {meta['generator']}")
+    if meta.get("repo_commit_sha"):
+        lines.append(f"- **Commit SHA:** `{meta['repo_commit_sha']}`")
+    if meta.get("source"):
+        lines.append(f"- **Source:** {meta['source']}")
+
+    # Model info
+    models = []
+    for key in ("scout_model", "planner_model", "writer_model"):
+        if meta.get(key):
+            models.append(f"{key.replace('_model', '')}: {meta[key]}")
+    if models:
+        lines.append(f"- **Models:** {', '.join(models)}")
+
+    # Source files — the key provenance data
+    source_files = meta.get("source_files", [])
+    source_hashes = meta.get("source_hashes", {})
+
+    if source_files:
+        lines.append(f"\n### Source files ({len(source_files)})\n")
+        lines.append("| File | Hash |")
+        lines.append("|------|------|")
+        for f in source_files:
+            h = source_hashes.get(f, "—")
+            lines.append(f"| `{f}` | `{h}` |")
+    else:
+        lines.append("\nNo source file references recorded.")
+
+    return "\n".join(lines)
+
+
+def format_write_result(doc: dict, action: str) -> str:
+    """Format a create/update confirmation message."""
+    title = doc.get("title", "Untitled")
+    path = doc.get("path", "")
+    doc_id = doc.get("id", "")
+    version = doc.get("version", 1)
+    description = doc.get("description") or ""
+
+    lines = [f"**{action}:** {title}\n"]
+    lines.append(f"- **Path:** {path}")
+    lines.append(f"- **ID:** `{doc_id}`")
+    lines.append(f"- **Version:** {version}")
+    if description:
+        lines.append(f"- **Description:** {description}")
+    return "\n".join(lines)
+
+
 def format_related(doc_title: str, deps: dict, title_cache: dict[str, str]) -> str:
     """Format dependency graph as incoming/outgoing wikilinks."""
     outgoing = deps.get("outgoing", [])

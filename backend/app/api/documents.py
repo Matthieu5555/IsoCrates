@@ -13,6 +13,8 @@ from ..database import get_db
 from datetime import datetime
 from fastapi import BackgroundTasks
 from ..schemas.document import DocumentCreate, DocumentResponse, DocumentListResponse, DocumentUpdate, DocumentMoveRequest, DocumentKeywordsUpdate, DocumentRepoUpdate, SearchResultResponse, SimilarDocumentResponse, BatchOperation, BatchResult, BatchParams, GenerateIdRequest, GenerateIdResponse
+from ..schemas.version import VersionResponse
+from ..repositories.version_repository import VersionRepository
 from ..services import DocumentService
 from ..services.dependency_service import DependencyService
 from ..services.embedding_service import EmbeddingService
@@ -404,6 +406,27 @@ def find_similar_to_doc(
         limit=limit,
         allowed_prefixes=_prefixes_from_auth(auth),
     )
+
+
+@router.get("/{doc_id}/versions/latest", response_model=VersionResponse)
+def get_latest_version(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(optional_auth),
+):
+    """Get the latest version of a document, including author metadata.
+
+    Useful for tracing provenance: which source files, commit SHA, and
+    generator produced this document.
+    """
+    doc_service = DocumentService(db)
+    _check_doc_access(doc_service, auth, doc_id, "read")
+
+    version_repo = VersionRepository(db)
+    version = version_repo.get_latest(doc_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail=f"No versions found for document {doc_id}")
+    return version
 
 
 @router.get("/{doc_id}/broken-links", response_model=list)
