@@ -291,7 +291,6 @@ class OpenHandsDocGenerator:
             tools=[
                 Tool(name=TerminalTool.name),
                 Tool(name=FileEditorTool.name),
-                Tool(name=TaskTrackerTool.name),
             ],
             condenser=writer_condenser,
         )

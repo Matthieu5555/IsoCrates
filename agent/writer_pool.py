@@ -83,7 +83,6 @@ class WriterPool:
             tools=[
                 Tool(name=TerminalTool.name),
                 Tool(name=FileEditorTool.name),
-                Tool(name=TaskTrackerTool.name),
             ],
             condenser=condenser,
         )
