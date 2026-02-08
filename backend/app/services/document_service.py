@@ -41,6 +41,19 @@ class DocumentService:
         self.version_repo = VersionRepository(db)
         self.dep_service = DependencyService(db)
 
+    @staticmethod
+    def _normalize_repo_url(repo_url: str) -> str:
+        """Normalize repo URL so variants produce the same hash.
+
+        Strips trailing slashes and .git suffix so that
+        ``https://github.com/org/repo.git`` and
+        ``https://github.com/org/repo`` resolve to the same ID.
+        """
+        url = repo_url.rstrip("/")
+        if url.endswith(".git"):
+            url = url[:-4]
+        return url
+
     def generate_doc_id(self, repo_url: Optional[str], path: str = "", title: str = "", doc_type: str = "") -> str:
         """Generate stable document ID."""
         # Standalone documents (no repository)
@@ -51,7 +64,8 @@ class DocumentService:
             logger.debug(f"Generated standalone doc_id={doc_id} for path={path}, title={title}")
             return doc_id
 
-        repo_hash = hashlib.sha256(repo_url.encode()).hexdigest()[:DOC_ID_REPO_HASH_LENGTH]
+        normalized_url = self._normalize_repo_url(repo_url)
+        repo_hash = hashlib.sha256(normalized_url.encode()).hexdigest()[:DOC_ID_REPO_HASH_LENGTH]
 
         if path or title:
             full_path = f"{path}/{title}" if path else title

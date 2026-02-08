@@ -57,6 +57,14 @@ export interface User {
   grants: FolderGrant[];
 }
 
+export interface SimilarDocument {
+  id: string;
+  title: string;
+  path: string;
+  description?: string;
+  similarity_score: number;
+}
+
 export interface PersonalTreeNode {
   id: string;
   name: string;

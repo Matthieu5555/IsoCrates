@@ -189,12 +189,16 @@ EXTERNAL LINKS vs WIKILINKS:
 """
 
 DESCRIPTION_REQUIREMENTS: str = """
-DESCRIPTION (MUST include in bottomatter):
+DESCRIPTION (MUST include in bottomatter — CRITICAL):
 
-After writing the page, write a 2-3 sentence description of what this page
-actually covers. This description is stored in the database and used by
-MCP tools, semantic search, and document listings — it must accurately
-reflect the CONTENT YOU WROTE, not a guess about what the page might contain.
+After writing the page, write a 2-3 sentence description of what THIS page
+covers. The description MUST mention the page title ("{title}") or its core
+topic. This description is stored in the database and used by MCP tools,
+semantic search, and document listings — it must accurately reflect the
+CONTENT YOU WROTE, not content from other pages or scout reports.
+
+WRONG: "This page covers the Next.js frontend architecture..." (if this page is about the agent pipeline)
+RIGHT: "This page covers the agent pipeline's three-tier architecture (Scout, Planner, Writer)..."
 
 Write the description as if explaining to a colleague: "This page covers X,
 including Y and Z. It is aimed at [audience]."

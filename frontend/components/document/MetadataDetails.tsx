@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, X, Check, Edit2, RefreshCw } from 'lucide-react';
 import type { Document } from '@/types';
-import { updateDocumentKeywords, updateDocumentRepo, triggerGeneration } from '@/lib/api/documents';
+import { updateDocumentKeywords, updateDocumentRepo, updateDocumentDescription, triggerGeneration } from '@/lib/api/documents';
 import {
   badgeVariants,
   buttonVariants,
@@ -36,10 +36,13 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
   const [customKeyword, setCustomKeyword] = useState('');
   const [editingRepo, setEditingRepo] = useState(false);
   const [repoUrl, setRepoUrl] = useState(document.repo_url || '');
+  const [editingDescription, setEditingDescription] = useState(false);
+  const [descriptionDraft, setDescriptionDraft] = useState(document.description || '');
   const [isRegenerating, setIsRegenerating] = useState(false);
 
   useEffect(() => { setMounted(true); }, []);
   useEffect(() => { setRepoUrl(document.repo_url || ''); }, [document.repo_url]);
+  useEffect(() => { setDescriptionDraft(document.description || ''); }, [document.description]);
 
   const keywords = document.keywords || [];
   const availablePresets = KEYWORD_PRESETS.filter(p => !keywords.includes(p));
@@ -79,6 +82,16 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
     }
   }
 
+  async function handleSaveDescription() {
+    try {
+      const updated = await updateDocumentDescription(document.id, descriptionDraft.trim());
+      onDocumentUpdate?.(updated);
+      setEditingDescription(false);
+    } catch {
+      toast.error('Failed to update description');
+    }
+  }
+
   async function handleSaveRepo() {
     try {
       const updated = await updateDocumentRepo(document.id, repoUrl.trim());
@@ -95,6 +108,51 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
       <div className={scrollContainerVariants.horizontal}>
         <table className="w-full text-sm">
         <tbody>
+          {/* Description — editable */}
+          <tr className={tableVariants.row}>
+            <td className={`${tableVariants.cell} font-medium text-muted-foreground align-top`}>Description</td>
+            <td className={tableVariants.cell}>
+              {editingDescription ? (
+                <div className="flex flex-col gap-2">
+                  <textarea
+                    value={descriptionDraft}
+                    onChange={e => setDescriptionDraft(e.target.value)}
+                    placeholder="A brief summary of this document..."
+                    className={`${inputVariants.default} !py-2 text-sm min-h-[80px] resize-y`}
+                    autoFocus
+                    onKeyDown={e => { if (e.key === 'Escape') { setEditingDescription(false); setDescriptionDraft(document.description || ''); } }}
+                  />
+                  <div className="flex items-center gap-2">
+                    <button onClick={handleSaveDescription} className={`${buttonVariants.primary} !px-3 !py-1 text-xs`}>
+                      <Check className="h-3 w-3 mr-1" />Save
+                    </button>
+                    <button
+                      onClick={() => { setEditingDescription(false); setDescriptionDraft(document.description || ''); }}
+                      className={`${buttonVariants.secondary} !px-3 !py-1 text-xs`}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-start gap-2 group">
+                  {document.description ? (
+                    <span className="text-sm">{document.description}</span>
+                  ) : (
+                    <span className={`${textVariants.mutedXs} italic`}>No description</span>
+                  )}
+                  <button
+                    onClick={() => setEditingDescription(true)}
+                    className={`${buttonVariants.icon} !p-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-0.5`}
+                    title="Edit description"
+                  >
+                    <Edit2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+            </td>
+          </tr>
+
           {/* Keywords — editable */}
           <tr className={tableVariants.row}>
             <td className={`${tableVariants.cell} font-medium text-muted-foreground align-top`}>Keywords</td>

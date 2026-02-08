@@ -124,6 +124,14 @@ class DocumentAPIClient:
             return self._generate_doc_id_local(repo_url, path, title, doc_type)
 
     @staticmethod
+    def _normalize_repo_url(repo_url: str) -> str:
+        """Normalize repo URL so .git suffix and trailing slashes don't matter."""
+        url = repo_url.rstrip("/")
+        if url.endswith(".git"):
+            url = url[:-4]
+        return url
+
+    @staticmethod
     def _generate_doc_id_local(
         repo_url: Optional[str],
         path: str = "",
@@ -141,7 +149,8 @@ class DocumentAPIClient:
             full_path = f"{path}/{title}" if path else title
             path_hash = hashlib.sha256(full_path.encode()).hexdigest()[:HASH_LEN]
             return f"doc-standalone-{path_hash}"
-        repo_hash = hashlib.sha256(repo_url.encode()).hexdigest()[:HASH_LEN]
+        normalized = IsoCratesAPIClient._normalize_repo_url(repo_url)
+        repo_hash = hashlib.sha256(normalized.encode()).hexdigest()[:HASH_LEN]
         if path or title:
             full_path = f"{path}/{title}" if path else title
             path_hash = hashlib.sha256(full_path.encode()).hexdigest()[:HASH_LEN]

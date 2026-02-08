@@ -25,9 +25,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import argparse
 import subprocess
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -466,13 +468,17 @@ class OpenHandsDocGenerator:
         # Existing doc context
         doc_context = self._build_document_context(discovery)
 
-        # Output path supports nested folders from planner
+        # Output path supports nested folders from planner.
+        # Each writer uses an isolated temp subdir to prevent parallel writers
+        # from reading each other's output and getting confused about their topic.
+        writer_id = uuid.uuid4().hex[:8]
         doc_path = doc_spec.get("path", f"{self.crate}{self.repo_name}".rstrip("/"))
         safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '-').lower()
         output_filename = f"{safe_title}.md"
         output_path = self.notes_dir / doc_path / output_filename
-        # Absolute path for file_editor (requires absolute paths starting with /)
-        absolute_output = self.repo_path / "notes" / doc_path / output_filename
+        # Isolated workspace path — writer writes here, we move to final location after
+        writer_tmp_dir = f".writer-{writer_id}"
+        absolute_output = self.repo_path / "notes" / writer_tmp_dir / doc_path / output_filename
 
         brief = f"""You are a technical documentation writer. Write ONE short, focused wiki page:
 "{title}" for the project at {self.repo_path}.
@@ -495,7 +501,7 @@ PRE-DIGESTED INTELLIGENCE (from repository scouts — filtered for this page):
 
 {WIKILINK_REQUIREMENTS}
 
-{DESCRIPTION_REQUIREMENTS}
+{DESCRIPTION_REQUIREMENTS.replace('{title}', title)}
 
 {SELF_CONTAINED_REQUIREMENTS}
 
@@ -510,6 +516,8 @@ EXPLORATION STRATEGY:
 - Use terminal commands to VERIFY specific details and read source files
 - Use terminal ONLY for read-only commands: ls, cat, grep, find, tree, git log
 - DO NOT run tests, execute scripts, or start applications
+- DO NOT read or explore the notes/ directory — it contains other writers' output
+  and will confuse you about YOUR assignment. Only read source code files.
 {files_directive}
 
 DOCUMENT STRUCTURE:
@@ -539,6 +547,25 @@ OUTPUT:
 - Work AUTONOMOUSLY — do not ask for permission
 """
         return brief
+
+    @staticmethod
+    def _fallback_description(title: str, content: str) -> str:
+        """Generate a description from content when writer omits bottomatter.
+
+        Extracts the first non-heading, non-empty paragraph from the markdown
+        body, prefixed with the page title for context.
+        """
+        for line in content.split("\n"):
+            stripped = line.strip()
+            # Skip headings, blank lines, tables, code fences, images
+            if not stripped or stripped.startswith(("#", "|", "```", "![", "---")):
+                continue
+            # Use first prose paragraph (trim to ~250 chars)
+            text = stripped[:250].rstrip()
+            if len(stripped) > 250:
+                text = text.rsplit(" ", 1)[0] + "..."
+            return f"{title}: {text}"
+        return title
 
     # ------------------------------------------------------------------
     # Source file provenance tracking (delegated to ProvenanceTracker)
@@ -679,9 +706,10 @@ OUTPUT:
         workspace_write_path = self.repo_path / "notes" / doc_path / output_filename
 
         try:
-            # Ensure output directories exist BEFORE agent runs
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-            workspace_write_path.parent.mkdir(parents=True, exist_ok=True)
+            # Ensure isolated output directory exists BEFORE agent runs.
+            # Each writer writes to notes/.writer-{id}/ so parallel writers
+            # can't see each other's output during exploration.
+            absolute_output.parent.mkdir(parents=True, exist_ok=True)
 
             # Maximum agent turns before forcing termination. Writers are told
             # to write early (within 10 commands), so this is a safety net.
@@ -697,25 +725,31 @@ OUTPUT:
             conversation.send_message(brief)
             conversation.run()
 
-            # Find output — writers write relative to workspace (self.repo_path)
-            # Primary location: workspace/notes/doc_path/filename.md
-            workspace_output_file = self.repo_path / "notes" / doc_path / output_filename
-            if workspace_output_file.exists():
-                output_file = workspace_output_file
-            elif not output_file.exists():
-                # Also try notes_dir name instead of "notes"
-                workspace_relative = self.repo_path / self.notes_dir.name / doc_path / output_filename
-                if workspace_relative.exists():
-                    output_file = workspace_relative
-                else:
-                    # Recursive search for the filename in workspace
-                    candidates = list(self.repo_path.rglob(output_filename))
-                    if not candidates:
-                        candidates = list(self.repo_path.rglob(f"*{safe_title}*.md"))
-                    if not candidates:
-                        candidates = list(self.repo_path.rglob(f"*{doc_type}*.md"))
-                    if candidates:
-                        output_file = candidates[0]
+            # Find output in the writer's isolated temp directory
+            writer_tmp_base = self.repo_path / "notes" / writer_tmp_dir
+            isolated_output = writer_tmp_base / doc_path / output_filename
+            if isolated_output.exists():
+                # Move from temp dir to final location
+                output_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(isolated_output), str(output_file))
+                print(f"   [Output] Moved from isolated dir to {output_file}")
+            else:
+                # Writer may have ignored the temp path — search for the file
+                candidates = list(writer_tmp_base.rglob(output_filename))
+                if not candidates:
+                    # Also check if writer wrote to the non-isolated notes path
+                    direct_path = self.repo_path / "notes" / doc_path / output_filename
+                    if direct_path.exists():
+                        output_file = direct_path
+                    else:
+                        candidates = list(self.repo_path.rglob(output_filename))
+                if candidates:
+                    output_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(candidates[0]), str(output_file))
+
+            # Clean up the writer's temp directory
+            if writer_tmp_base.exists():
+                shutil.rmtree(writer_tmp_base, ignore_errors=True)
 
             if not output_file.exists():
                 print(f"   [Warning] Output file not found")
@@ -733,6 +767,8 @@ OUTPUT:
                 metadata, body = parse_frontmatter(raw_content)
 
             writer_description = (metadata or {}).get("description", "")
+            if not writer_description:
+                print(f"   [Warning] Writer did not include description in bottomatter")
 
             body = re.sub(r"^\*Documentation Written by.*?\*\n+", "", body)
             clean_content = re.sub(
@@ -779,7 +815,7 @@ OUTPUT:
                 "title": api_title,
                 "doc_type": doc_type,
                 "content": clean_content,
-                "description": writer_description or doc_spec.get("description", ""),
+                "description": writer_description or self._fallback_description(title, clean_content),
                 "keywords": keywords,
                 "author_type": "ai",
                 "author_metadata": {

@@ -4,8 +4,9 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { Search, X, Clock, Filter } from 'lucide-react';
-import { searchDocuments, getRecentDocuments, type SearchResult, type SearchFilters } from '@/lib/api/documents';
-import type { DocumentListItem } from '@/types';
+import { searchDocuments, findSimilarDocuments, getRecentDocuments, type SearchResult, type SearchFilters } from '@/lib/api/documents';
+import type { DocumentListItem, SimilarDocument } from '@/types';
+import { Sparkles } from 'lucide-react';
 import { dialogVariants, buttonVariants, badgeVariants, listVariants, kbdVariants } from '@/lib/styles/button-variants';
 import { getApiErrorMessage } from '@/lib/api/client';
 import { toast } from '@/lib/notifications/toast';
@@ -36,6 +37,8 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
   const [pathPrefix, setPathPrefix] = useState('');
   const [keywords, setKeywords] = useState('');
   const [dateRange, setDateRange] = useState('');
+  const [useSemantic, setUseSemantic] = useState(false);
+  const [semanticResults, setSemanticResults] = useState<SimilarDocument[]>([]);
 
   // Load recent docs when modal opens with no query
   useEffect(() => {
@@ -48,35 +51,48 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
   useEffect(() => {
     if (!query || query.length < 2) {
       setResults([]);
+      setSemanticResults([]);
       return;
     }
 
     const timeoutId = setTimeout(async () => {
       setLoading(true);
       try {
-        const filters: SearchFilters = {};
-        if (pathPrefix) filters.path_prefix = pathPrefix;
-        if (keywords) filters.keywords = keywords;
-        if (dateRange) {
-          const d = new Date();
-          d.setDate(d.getDate() - parseInt(dateRange));
-          filters.date_from = d.toISOString();
+        if (useSemantic) {
+          const similar = await findSimilarDocuments(query, 10);
+          setSemanticResults(similar);
+          setResults([]);
+        } else {
+          const filters: SearchFilters = {};
+          if (pathPrefix) filters.path_prefix = pathPrefix;
+          if (keywords) filters.keywords = keywords;
+          if (dateRange) {
+            const d = new Date();
+            d.setDate(d.getDate() - parseInt(dateRange));
+            filters.date_from = d.toISOString();
+          }
+          const searchResults = await searchDocuments(query, 10, filters);
+          setResults(searchResults);
+          setSemanticResults([]);
         }
-        const searchResults = await searchDocuments(query, 10, filters);
-        setResults(searchResults);
         setSelectedIndex(0);
       } catch (error) {
         console.error('Search failed:', error);
         const message = getApiErrorMessage(error);
-        toast.error('Search Failed', message);
+        if (useSemantic && typeof message === 'string' && message.includes('500')) {
+          toast.error('Semantic search unavailable', 'Embeddings may not be configured. Switch to keyword search.');
+        } else {
+          toast.error('Search Failed', message);
+        }
         setResults([]);
+        setSemanticResults([]);
       } finally {
         setLoading(false);
       }
     }, SEARCH_DEBOUNCE_MS);
 
     return () => clearTimeout(timeoutId);
-  }, [query, pathPrefix, keywords, dateRange]);
+  }, [query, pathPrefix, keywords, dateRange, useSemantic]);
 
   const handleSelect = useCallback((docId: string) => {
     router.push(`/docs/${docId}`);
@@ -90,6 +106,7 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
     if (!open) {
       setQuery('');
       setResults([]);
+      setSemanticResults([]);
       setSelectedIndex(0);
       setShowFilters(false);
     }
@@ -99,7 +116,9 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
   useEffect(() => {
     if (!open) return;
 
-    const displayItems = query.length >= 2 ? results : recentDocs;
+    const displayItems = query.length >= 2
+      ? (useSemantic ? semanticResults : results)
+      : recentDocs;
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
@@ -118,11 +137,12 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [open, results, recentDocs, selectedIndex, handleSelect, onOpenChange, query]);
+  }, [open, results, semanticResults, recentDocs, selectedIndex, handleSelect, onOpenChange, query, useSemantic]);
 
   if (!open) return null;
 
-  const displayItems = query.length >= 2 ? results : recentDocs;
+  const activeResults = useSemantic ? semanticResults : results;
+  const displayItems = query.length >= 2 ? activeResults : recentDocs;
   const showRecent = !query && recentDocs.length > 0;
 
   return createPortal(
@@ -139,11 +159,19 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search documentation..."
+                placeholder={useSemantic ? "Semantic search (find similar)..." : "Search documentation..."}
                 className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                 autoFocus
               />
             </div>
+            <button
+              type="button"
+              onClick={() => setUseSemantic(!useSemantic)}
+              className={`${buttonVariants.icon} ${useSemantic ? 'text-primary' : ''}`}
+              title={useSemantic ? 'Switch to keyword search' : 'Switch to semantic search'}
+            >
+              <Sparkles className="h-4 w-4" />
+            </button>
             <button
               type="button"
               onClick={() => setShowFilters(!showFilters)}
@@ -206,9 +234,12 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
               </div>
             )}
 
-            {!loading && query.length >= 2 && results.length === 0 && (
+            {!loading && query.length >= 2 && activeResults.length === 0 && (
               <div className="py-6 text-center text-sm text-muted-foreground">
                 No results found for &quot;{query}&quot;
+                {useSemantic && (
+                  <div className="mt-1 text-xs">Semantic search requires embeddings to be configured.</div>
+                )}
               </div>
             )}
 
@@ -238,8 +269,8 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
               </>
             )}
 
-            {/* Search results */}
-            {!loading && results.length > 0 && (
+            {/* Search results (keyword mode) */}
+            {!loading && !useSemantic && results.length > 0 && (
               <div className={listVariants.container}>
                 {results.map((doc, index) => {
                   const snippet = 'snippet' in doc ? doc.snippet : null;
@@ -294,6 +325,51 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
                     </button>
                   );
                 })}
+              </div>
+            )}
+
+            {/* Semantic search results */}
+            {!loading && useSemantic && semanticResults.length > 0 && (
+              <div className={listVariants.container}>
+                {semanticResults.map((doc, index) => (
+                  <button
+                    key={doc.id}
+                    onClick={() => handleSelect(doc.id)}
+                    className={`${listVariants.item} w-full text-left flex items-center gap-3 ${
+                      index === selectedIndex ? 'bg-accent text-accent-foreground' : ''
+                    }`}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-3 mb-1">
+                        <span className="font-medium truncate text-sm">
+                          {doc.title}
+                        </span>
+                        <span className={badgeVariants.default}>
+                          {Math.round(doc.similarity_score * 100)}%
+                        </span>
+                      </div>
+                      {doc.description && (
+                        <p className="text-xs text-muted-foreground line-clamp-2">
+                          {doc.description}
+                        </p>
+                      )}
+                      {doc.path && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {doc.path}
+                        </p>
+                      )}
+                    </div>
+                    <svg
+                      className="ml-2 h-4 w-4 opacity-50 shrink-0"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      viewBox="0 0 24 24"
+                    >
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                  </button>
+                ))}
               </div>
             )}
 

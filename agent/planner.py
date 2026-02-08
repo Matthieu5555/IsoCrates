@@ -31,6 +31,10 @@ SCOUT_RELEVANCE: dict[str, list[str]] = {
     "component":     ["architecture", "api"],
     "contributing":  ["tests", "structure", "infra"],
     "capabilities":  ["structure", "api", "architecture"],
+    "security":      ["api", "architecture"],
+    "reference":     ["api", "architecture"],
+    "operations":    ["infra", "structure"],
+    "runbook":       ["infra", "structure"],
 }
 
 
