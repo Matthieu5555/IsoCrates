@@ -47,7 +47,7 @@ from openhands.tools.task_tracker import TaskTrackerTool
 from openhands.tools.terminal import TerminalTool
 
 # Static repo analysis
-from repo_analysis import ModuleInfo, RepoAnalysis, analyze_repository
+from repo_analysis import ModuleInfo, RepoAnalysis, analyze_repository, detect_crates
 
 # Document lifecycle (discovery, snapshot, cleanup)
 from document_lifecycle import DocumentLifecycle, get_current_commit_sha
@@ -94,10 +94,11 @@ from version_priority import VersionPriorityEngine
 from security import RepositoryValidator, PathValidator
 
 # Model constraint resolution
-from model_config import resolve_model_config
+from model_config import ModelConfigError, resolve_model_config
 
 # Extracted concerns
 from provenance import ProvenanceTracker
+from scout_pool import ScoutPool
 from writer_pool import WriterPool
 
 # Prevent interactive pagers from trapping agents in git commands
@@ -227,9 +228,13 @@ class OpenHandsDocGenerator:
             )
 
         # ---- Resolve model constraints --------------------------------------
-        self._scout_config = resolve_model_config(SCOUT_MODEL)
-        self._planner_config = resolve_model_config(PLANNER_MODEL)
-        self._writer_config = resolve_model_config(WRITER_MODEL)
+        try:
+            self._scout_config = resolve_model_config(SCOUT_MODEL)
+            self._planner_config = resolve_model_config(PLANNER_MODEL)
+            self._writer_config = resolve_model_config(WRITER_MODEL)
+        except ModelConfigError as e:
+            print(f"[Error] Model configuration failed: {e}")
+            raise
 
         # ---- Tier 0: Scout Agent -------------------------------------------
         scout_kwargs = _llm_kwargs("SCOUT")
@@ -308,6 +313,14 @@ class OpenHandsDocGenerator:
             llm_kwargs_fn=_llm_kwargs,
         )
 
+        # Scout pool (parallel scout agent creation and orchestration)
+        self.scout_pool = ScoutPool(
+            scout_config=self._scout_config,
+            scout_model=SCOUT_MODEL,
+            native_tool_calling=LLM_NATIVE_TOOL_CALLING,
+            llm_kwargs_fn=_llm_kwargs,
+        )
+
         # Scout runner
         self.scout_runner = ScoutRunner(
             scout_agent=self.scout_agent,
@@ -318,6 +331,8 @@ class OpenHandsDocGenerator:
             conversation_cls=Conversation,
             message_cls=Message,
             text_content_cls=TextContent,
+            planner_context_window=self._planner_config.context_window,
+            scout_pool=self.scout_pool,
         )
 
         # Planner
@@ -328,7 +343,7 @@ class OpenHandsDocGenerator:
             notes_dir=self.notes_dir,
             message_cls=Message,
             text_content_cls=TextContent,
-            get_repo_metrics=lambda: ScoutRunner._estimate_repo(self.repo_path, self.crate),
+            context_budget=self._planner_config.context_window,
         )
 
         print("[Agent] Three-Tier Documentation Generator Configured:")
@@ -386,7 +401,15 @@ class OpenHandsDocGenerator:
     # ------------------------------------------------------------------
 
     def _planner_think(self, scout_reports: str, existing_docs: list[dict] | None = None) -> dict:
-        """Delegate to planner.plan()."""
+        """Route to single-pass or hierarchical planner based on report size."""
+        reports_by_key = getattr(self, "_scout_reports_by_key", {})
+        # Use hierarchical planning when individual reports are available
+        # and their combined size exceeds the planner's context budget
+        if reports_by_key:
+            total_tokens = sum(len(r) for r in reports_by_key.values()) // 4
+            threshold = int(self._planner_config.context_window * 0.7)
+            if total_tokens > threshold:
+                return self.planner.plan_hierarchical(reports_by_key, existing_docs)
         return self.planner.plan(scout_reports, existing_docs)
 
     def _sanitize_wikilinks(self, content: str, valid_titles: set[str], repo_url: str) -> str:
@@ -412,6 +435,7 @@ class OpenHandsDocGenerator:
         blueprint: dict[str, Any],
         discovery: dict[str, dict[str, Any]],
         scout_reports: str,
+        writer_tmp_dir: str = "",
     ) -> str:
         """
         Build a focused brief for a Writer agent based on the planner's
@@ -471,13 +495,14 @@ class OpenHandsDocGenerator:
         # Output path supports nested folders from planner.
         # Each writer uses an isolated temp subdir to prevent parallel writers
         # from reading each other's output and getting confused about their topic.
-        writer_id = uuid.uuid4().hex[:8]
         doc_path = doc_spec.get("path", f"{self.crate}{self.repo_name}".rstrip("/"))
         safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '-').lower()
         output_filename = f"{safe_title}.md"
         output_path = self.notes_dir / doc_path / output_filename
-        # Isolated workspace path — writer writes here, we move to final location after
-        writer_tmp_dir = f".writer-{writer_id}"
+        # Isolated workspace path — caller provides writer_tmp_dir so that
+        # generate_document() knows where to find the output afterwards.
+        if not writer_tmp_dir:
+            writer_tmp_dir = f".writer-{uuid.uuid4().hex[:8]}"
         absolute_output = self.repo_path / "notes" / writer_tmp_dir / doc_path / output_filename
 
         brief = f"""You are a technical documentation writer. Write ONE short, focused wiki page:
@@ -694,16 +719,24 @@ OUTPUT:
 
         print(f"   [Generate] {reason}")
 
-        # Build writer brief (now includes scout reports)
-        brief = self._build_writer_brief(doc_spec, blueprint, discovery, scout_reports)
-
         # Compute output path matching what the writer brief specifies
         doc_path = doc_spec.get("path", f"{self.crate}{self.repo_name}".rstrip("/"))
         safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '-').lower()
         output_filename = f"{safe_title}.md"
         output_file = self.notes_dir / doc_path / output_filename
-        # Path the agent will write to (inside workspace)
-        workspace_write_path = self.repo_path / "notes" / doc_path / output_filename
+
+        # Isolated workspace path — writer writes here, we move to final location after.
+        # The same writer_id/writer_tmp_dir is passed to _build_writer_brief so the
+        # agent is told to write to the same path we look for afterwards.
+        writer_id = uuid.uuid4().hex[:8]
+        writer_tmp_dir = f".writer-{writer_id}"
+        absolute_output = self.repo_path / "notes" / writer_tmp_dir / doc_path / output_filename
+
+        # Build writer brief (now includes scout reports)
+        brief = self._build_writer_brief(
+            doc_spec, blueprint, discovery, scout_reports,
+            writer_tmp_dir=writer_tmp_dir,
+        )
 
         try:
             # Ensure isolated output directory exists BEFORE agent runs.
@@ -775,7 +808,12 @@ OUTPUT:
                 r"\n---\n\n\*Documentation.*$", "", body, flags=re.DOTALL
             )
 
-            # Sanitize wikilinks: keep valid, convert files to GitHub, strip rest
+            # Sanitize wikilinks: keep valid, convert files to GitHub, strip rest.
+            # NOTE: This first pass uses planned titles so writers referencing
+            # each other's pages keep their links during generation. A second
+            # pass in generate_all() re-sanitizes using *actually generated*
+            # titles so any pages that failed to generate get their links
+            # stripped to plain text.
             valid_titles = {d["title"] for d in blueprint.get("documents", [])}
             clean_content = self._sanitize_wikilinks(clean_content, valid_titles, self.repo_url)
 
@@ -815,7 +853,7 @@ OUTPUT:
                 "title": api_title,
                 "doc_type": doc_type,
                 "content": clean_content,
-                "description": writer_description or self._fallback_description(title, clean_content),
+                "description": writer_description or doc_spec.get("description") or self._fallback_description(title, clean_content),
                 "keywords": keywords,
                 "author_type": "ai",
                 "author_metadata": {
@@ -1029,6 +1067,82 @@ OUTPUT:
                 else:
                     id_stats["new"] += 1
 
+        # Post-generation wikilink re-sanitization:
+        # Rebuild valid_titles from *actually generated* titles (not planned).
+        # This strips [[links]] to pages whose writers failed/timed out.
+        actually_generated_titles = {
+            title for title, result in results.items()
+            if result.get("status") in ("success", "skipped")
+        }
+        planned_titles = {d["title"] for d in documents}
+        dangling_titles = planned_titles - actually_generated_titles
+        if dangling_titles:
+            print(f"\n[Wikilink Cleanup] {len(dangling_titles)} planned page(s) were never generated:")
+            for dt in sorted(dangling_titles):
+                print(f"   - {dt}")
+            print(f"   Re-sanitizing {len(results)} documents to strip broken wikilinks...")
+
+            resanitized_count = 0
+            for title, result in results.items():
+                if result.get("status") != "success":
+                    continue
+                doc_id = result.get("doc_id")
+                api_result = result.get("api_result", {})
+                if not doc_id or api_result.get("method") == "filesystem":
+                    continue
+
+                # Fetch the document content from the API
+                try:
+                    doc = self.api_client.get_document(doc_id)
+                    if not doc:
+                        continue
+                    content = doc.get("content", "")
+                    # Check if content has any dangling wikilinks
+                    has_dangling = any(
+                        f"[[{dt}]]" in content or f"[[{dt}|" in content
+                        for dt in dangling_titles
+                    )
+                    if not has_dangling:
+                        continue
+                    # Re-sanitize with actually generated titles only
+                    clean = self._sanitize_wikilinks(content, actually_generated_titles, self.repo_url)
+                    if clean != content:
+                        self.api_client.update_document(doc_id, {"content": clean})
+                        resanitized_count += 1
+                except Exception as e:
+                    logger.warning("Failed to re-sanitize doc %s: %s", doc_id, e)
+
+            if resanitized_count:
+                print(f"   Re-sanitized {resanitized_count} document(s)")
+
+        # Broken wikilink validation report
+        wikilink_pattern = re.compile(r'\[\[(.+?)\]\]')
+        dangling_report: dict[str, list[str]] = {}
+        for title, result in results.items():
+            if result.get("status") != "success":
+                continue
+            doc_id = result.get("doc_id")
+            if not doc_id:
+                continue
+            try:
+                doc = self.api_client.get_document(doc_id)
+                if not doc:
+                    continue
+                content = doc.get("content", "")
+                for m in wikilink_pattern.finditer(content):
+                    inner = m.group(1)
+                    target = inner.split("|")[0].strip() if "|" in inner else inner.strip()
+                    if target not in actually_generated_titles:
+                        dangling_report.setdefault(title, []).append(target)
+            except Exception:
+                pass
+
+        if dangling_report:
+            print(f"\n[Wikilink Report] Dangling wikilinks found in {len(dangling_report)} document(s):")
+            for doc_title, targets in sorted(dangling_report.items()):
+                unique_targets = sorted(set(targets))
+                print(f"   {doc_title}: {', '.join(unique_targets)}")
+
         # Summary
         print("\n" + "=" * 70)
         print("[Summary] GENERATION COMPLETE")
@@ -1126,6 +1240,11 @@ Examples:
         action="store_true",
         help="Force regeneration even if repo is unchanged since last run",
     )
+    parser.add_argument(
+        "--auto-crates",
+        action="store_true",
+        help="Automatically detect and process independent sub-projects (crates)",
+    )
     args = parser.parse_args()
 
     # Override config if specified via CLI
@@ -1176,12 +1295,42 @@ Examples:
         print(f"[Error] Failed to clone repository: {e}")
         sys.exit(1)
 
-    # Generate
-    generator = OpenHandsDocGenerator(repo_path, sanitized_url, sanitized_crate)
+    # Auto-crate detection: when --auto-crates is set and no explicit --crate,
+    # detect sub-projects and run the pipeline once per crate.
+    if args.auto_crates and not sanitized_crate:
+        crates = detect_crates(repo_path)
+        if len(crates) > 1:
+            print(f"[Auto-Crates] Detected {len(crates)} independent sub-projects:")
+            for c in crates:
+                print(f"   {c['path']} ({c['marker']})")
+            print()
 
-    if args.doc_type == "auto":
-        results = generator.generate_all(force=args.force)
+            all_results = {}
+            for crate_info in crates:
+                crate_path = crate_info["path"]
+                print(f"\n{'='*70}")
+                print(f"[Auto-Crates] Processing crate: {crate_path}")
+                print(f"{'='*70}")
+                gen = OpenHandsDocGenerator(repo_path, sanitized_url, crate_path)
+                crate_results = gen.generate_all(force=args.force)
+                for title, result in crate_results.items():
+                    all_results[f"{crate_path}/{title}"] = result
+
+            results = all_results
+        else:
+            if crates:
+                print(f"[Auto-Crates] Only 1 sub-project detected ({crates[0]['path']}), "
+                      f"processing as single repo")
+            generator = OpenHandsDocGenerator(repo_path, sanitized_url, sanitized_crate)
+            results = generator.generate_all(force=args.force) if args.doc_type == "auto" else {}
     else:
+        generator = OpenHandsDocGenerator(repo_path, sanitized_url, sanitized_crate)
+        results = {}
+
+    # Generate (single-crate path or doc-type mode)
+    if not results and args.doc_type == "auto":
+        results = generator.generate_all(force=args.force)
+    elif not results:
         # Single doc mode — run scouts + planner for context, then one writer
         scout_reports = generator._run_scouts()
         blueprint = generator._planner_think(scout_reports)

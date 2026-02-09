@@ -160,6 +160,18 @@ async def lifespan(app: FastAPI):
                 localhost_origins,
             )
 
+    # --- Seed initial documents (first startup only) ---
+    from .core.seeder import seed_initial_documents
+    db = SessionLocal()
+    try:
+        seeded = seed_initial_documents(db)
+        if seeded > 0:
+            logger.info(f"First startup: seeded {seeded} documents")
+    except Exception as e:
+        logger.warning(f"Seed loading failed (non-fatal): {e}")
+    finally:
+        db.close()
+
     # --- Purge expired trash ---
     db = SessionLocal()
     try:
@@ -200,7 +212,7 @@ app = FastAPI(
         "When `AUTH_ENABLED=false` (default), all endpoints are open."
     ),
     version="1.0.0",
-    license_info={"name": "Proprietary"},
+    license_info={"name": "MIT", "url": "https://opensource.org/licenses/MIT"},
     lifespan=lifespan,
 )
 

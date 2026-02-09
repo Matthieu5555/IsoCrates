@@ -162,6 +162,19 @@ class BatchResult(BaseModel):
     errors: List[BatchError] = []
 
 
+class AskRequest(BaseModel):
+    """Request body for RAG chat."""
+    question: str = Field(..., min_length=1, max_length=500)
+    top_k: int = Field(default=5, ge=1, le=10)
+
+
+class AskResponse(BaseModel):
+    """Response from RAG chat."""
+    answer: str
+    sources: List[dict]
+    model: str
+
+
 class GenerateIdRequest(BaseModel):
     """Request to generate a stable document ID."""
     repo_url: Optional[str] = None

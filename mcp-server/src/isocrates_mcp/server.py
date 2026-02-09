@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .api_client import IsoCratesClient
 from .formatters import (
+    format_ask_response,
     format_document,
     format_document_list,
     format_provenance,
@@ -212,6 +213,28 @@ async def get_document_sources(title_or_id: str) -> str:
         return format_provenance(doc_title, version)
     except Exception as e:
         return f"Error getting document sources: {e}"
+
+
+@mcp.tool()
+async def ask_docs(
+    question: str,
+    top_k: int = 5,
+) -> str:
+    """Ask a question and get an answer based on the IsoCrates documentation.
+
+    Uses RAG (Retrieval Augmented Generation): searches the documentation
+    for relevant pages, then sends them as context to an LLM to generate
+    a grounded answer with source citations.
+
+    Args:
+        question: Natural language question about the documented codebase
+        top_k: Number of documents to retrieve as context (default 5)
+    """
+    try:
+        result = await client.ask(question, top_k)
+        return format_ask_response(result)
+    except Exception as e:
+        return f"Error asking question: {e}"
 
 
 @mcp.tool()

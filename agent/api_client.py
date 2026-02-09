@@ -149,7 +149,7 @@ class DocumentAPIClient:
             full_path = f"{path}/{title}" if path else title
             path_hash = hashlib.sha256(full_path.encode()).hexdigest()[:HASH_LEN]
             return f"doc-standalone-{path_hash}"
-        normalized = IsoCratesAPIClient._normalize_repo_url(repo_url)
+        normalized = DocumentAPIClient._normalize_repo_url(repo_url)
         repo_hash = hashlib.sha256(normalized.encode()).hexdigest()[:HASH_LEN]
         if path or title:
             full_path = f"{path}/{title}" if path else title
@@ -175,6 +175,21 @@ class DocumentAPIClient:
             return response.json()
         except requests.exceptions.RequestException as exc:
             logger.warning("Failed to get document %s: %s", doc_id, exc)
+            return None
+
+    def update_document(self, doc_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Update a document by ID. Returns updated doc or None on failure."""
+        try:
+            response = requests.put(
+                f"{self.api_url}/api/docs/{doc_id}",
+                json=updates,
+                timeout=self.timeout,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as exc:
+            logger.warning("Failed to update document %s: %s", doc_id, exc)
             return None
 
     def get_document_versions(self, doc_id: str) -> list:

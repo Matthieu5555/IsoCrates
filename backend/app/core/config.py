@@ -97,6 +97,18 @@ class Settings(BaseSettings):
         description="Embedding vector dimensions (0 = use model default)"
     )
 
+    # Chat / RAG Configuration
+    # LiteLLM model string for RAG chat completions.
+    # Reuses embedding_api_key. Empty string = chat disabled.
+    chat_model: str = Field(
+        default="openai/gpt-4o-mini",
+        description="LiteLLM model for RAG chat completions"
+    )
+    chat_max_context_docs: int = Field(
+        default=5,
+        description="Max documents to include as RAG context"
+    )
+
     # Logging Configuration
     log_level: str = Field(
         default="INFO",

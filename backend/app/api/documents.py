@@ -12,7 +12,7 @@ from ..core.auth import AuthContext, require_auth, require_admin, optional_auth
 from ..database import get_db
 from datetime import datetime
 from fastapi import BackgroundTasks
-from ..schemas.document import DocumentCreate, DocumentResponse, DocumentListResponse, DocumentUpdate, DocumentMoveRequest, DocumentKeywordsUpdate, DocumentRepoUpdate, SearchResultResponse, SimilarDocumentResponse, BatchOperation, BatchResult, BatchParams, GenerateIdRequest, GenerateIdResponse
+from ..schemas.document import DocumentCreate, DocumentResponse, DocumentListResponse, DocumentUpdate, DocumentMoveRequest, DocumentKeywordsUpdate, DocumentRepoUpdate, SearchResultResponse, SimilarDocumentResponse, BatchOperation, BatchResult, BatchParams, GenerateIdRequest, GenerateIdResponse, AskRequest, AskResponse
 from ..schemas.version import VersionResponse
 from ..repositories.version_repository import VersionRepository
 from ..services import DocumentService
@@ -164,6 +164,27 @@ def batch_operation(
         params=batch.params,
         grants=auth.grants,
         is_service_account=auth.is_service_account,
+    )
+
+
+@router.post("/ask/", response_model=AskResponse)
+def ask_docs(
+    body: AskRequest,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(optional_auth),
+):
+    """Ask a question and get an answer based on the documentation (RAG).
+
+    Retrieves relevant documents via FTS + semantic search, then sends them
+    as context to an LLM for answer generation. Returns the answer with
+    source citations.
+    """
+    from ..services.chat_service import ChatService
+    service = ChatService(db)
+    return service.ask(
+        question=body.question,
+        top_k=body.top_k,
+        allowed_prefixes=_prefixes_from_auth(auth),
     )
 
 

@@ -6,6 +6,7 @@ produce structured intelligence reports for the planner.
 
 import dataclasses
 import logging
+import os
 from pathlib import Path
 
 from prompts import (
@@ -59,12 +60,16 @@ class ScoutRunner:
         conversation_cls: type,
         message_cls: type,
         text_content_cls: type,
+        planner_context_window: int = 131_072,
+        scout_pool: "ScoutPool | None" = None,
     ) -> None:
         self.scout_agent = scout_agent
         self.planner_llm = planner_llm
         self.repo_path = repo_path
         self.crate = crate
         self._context_window = scout_context_window
+        self._planner_context_window = planner_context_window
+        self._scout_pool = scout_pool
         self._Conversation = conversation_cls
         self._Message = message_cls
         self._TextContent = text_content_cls
@@ -111,9 +116,15 @@ class ScoutRunner:
         combined = "\n\n---\n\n".join(reports.values())
         print(f"\n[Scouts] All reports collected: {len(combined)} chars total")
 
-        if len(combined) > 20000:
-            print(f"[Scouts] Compressing reports for writers ({len(combined)} chars → ~15K)...")
-            compressed_by_key = self._compress_reports(reports)
+        # Adaptive compression target: reserve ~50% of planner context for
+        # the prompt template, convert remaining tokens to chars (× 4).
+        compression_target = int(self._planner_context_window * 0.5 * 4)
+        compression_target = max(compression_target, 15_000)  # floor
+
+        if len(combined) > compression_target:
+            print(f"[Scouts] Compressing reports for writers "
+                  f"({len(combined)} chars → ~{compression_target // 1000}K)...")
+            compressed_by_key = self._compress_reports(reports, target_chars=compression_target)
             compressed_text = "\n\n---\n\n".join(compressed_by_key.values())
             print(f"[Scouts] Compressed: {len(compressed_text)} chars")
         else:
@@ -185,64 +196,109 @@ class ScoutRunner:
         print(f"[Scouts] Running {len(scouts_to_run)} scouts: {', '.join(scouts_to_run)} "
               f"(max {self._max_iters} iters each)")
 
-        reports: dict[str, str] = {}
-        for idx, scout_key in enumerate(scouts_to_run, 1):
+        # Build prompts for all scouts up front
+        scout_tasks: list[dict] = []
+        for scout_key in scouts_to_run:
             scout_def = SCOUT_DEFINITIONS[scout_key]
-            report_path = Path(f"/tmp/scout_report_{scout_key}.md")
-
-            print(f"\n[Scout {idx}/{len(scouts_to_run)}] {scout_def['name']}...")
-
             manifest_section = build_file_manifest_section(
-                metrics["file_manifest"], scout_key
+                metrics["file_manifest"], scout_key,
+                budget_ratio=budget_ratio,
+                total_files=metrics["file_count"],
             )
             prompt = scout_def["prompt"].format(
                 repo_path=self.repo_path,
                 file_manifest=manifest_section,
                 constraints=build_constraints(budget_ratio),
             )
+            scout_tasks.append({
+                "key": scout_key,
+                "name": scout_def["name"],
+                "prompt": prompt,
+            })
 
-            # Retry once on failure with a brief pause before the second attempt.
-            max_attempts = 2
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    conversation = self._Conversation(
-                        agent=self.scout_agent,
-                        workspace=str(self.repo_path),
-                        max_iteration_per_run=self._max_iters,
-                    )
-                    conversation.send_message(prompt)
-                    conversation.run()
+        # Parallel path: use ScoutPool when available and >= 3 scouts
+        if self._scout_pool and len(scout_tasks) >= 3:
+            return self._scout_pool.run_parallel(
+                scout_tasks=scout_tasks,
+                run_one_fn=self._run_single_topic_scout,
+            )
 
-                    if report_path.exists():
-                        report_text = report_path.read_text()
-                        reports[scout_key] = report_text
-                        lines = len(report_text.strip().split("\n"))
-                        print(f"   [Done] {scout_def['name']}: {lines} lines")
-                    else:
-                        print(f"   [Warning] Scout {scout_key} did not produce a report")
-                        reports[scout_key] = (
-                            f"## Scout Report: {scout_def['name']}\n"
-                            f"### Key Findings\nNo report produced.\n"
-                            f"### Status: INCOMPLETE\n"
-                        )
-                    break  # success — no retry needed
-
-                except Exception as e:
-                    if attempt < max_attempts:
-                        import time
-                        wait = 2 ** attempt  # 2s, then 4s
-                        logger.warning("Scout %s attempt %d failed, retrying in %ds: %s", scout_key, attempt, wait, e)
-                        print(f"   [Retry] {scout_def['name']} failed, retrying in {wait}s...")
-                        time.sleep(wait)
-                    else:
-                        logger.error("Scout %s failed after %d attempts: %s", scout_key, max_attempts, e)
-                        reports[scout_key] = (
-                            f"## Scout Report: {scout_def['name']}\n"
-                            f"### Key Findings\nScout failed after {max_attempts} attempts: {e}\n"
-                            f"### Status: FAILED\n"
-                        )
+        # Sequential path: original behavior
+        reports: dict[str, str] = {}
+        for idx, task in enumerate(scout_tasks, 1):
+            print(f"\n[Scout {idx}/{len(scout_tasks)}] {task['name']}...")
+            _, report = self._run_single_topic_scout(task, self.scout_agent)
+            reports[task["key"]] = report
 
         return reports
+
+    def _run_single_topic_scout(
+        self, task: dict, agent: object,
+    ) -> tuple[str, str]:
+        """Run one topic scout. Used by both sequential and parallel paths.
+
+        Args:
+            task: Dict with "key", "name", "prompt".
+            agent: Agent instance (shared in sequential, independent in parallel).
+
+        Returns:
+            (scout_key, report_text).
+        """
+        import uuid
+        scout_key = task["key"]
+        scout_name = task["name"]
+        prompt = task["prompt"]
+        # Thread-safe report path with unique suffix
+        uid = uuid.uuid4().hex[:8]
+        report_path = Path(f"/tmp/scout_report_{scout_key}_{uid}.md")
+
+        # Rewrite the prompt to use the unique report path
+        generic_path = f"/tmp/scout_report_{scout_key}.md"
+        prompt = prompt.replace(generic_path, str(report_path))
+
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            try:
+                conversation = self._Conversation(
+                    agent=agent,
+                    workspace=str(self.repo_path),
+                    max_iteration_per_run=self._max_iters,
+                )
+                conversation.send_message(prompt)
+                conversation.run()
+
+                if report_path.exists():
+                    report_text = report_path.read_text()
+                    lines = len(report_text.strip().split("\n"))
+                    print(f"   [Done] {scout_name}: {lines} lines")
+                    return scout_key, report_text
+                else:
+                    print(f"   [Warning] Scout {scout_key} did not produce a report")
+                    return scout_key, (
+                        f"## Scout Report: {scout_name}\n"
+                        f"### Key Findings\nNo report produced.\n"
+                        f"### Status: INCOMPLETE\n"
+                    )
+
+            except Exception as e:
+                if attempt < max_attempts:
+                    import time
+                    wait = 2 ** attempt
+                    logger.warning("Scout %s attempt %d failed, retrying in %ds: %s",
+                                   scout_key, attempt, wait, e)
+                    print(f"   [Retry] {scout_name} failed, retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    logger.error("Scout %s failed after %d attempts: %s",
+                                 scout_key, max_attempts, e)
+                    return scout_key, (
+                        f"## Scout Report: {scout_name}\n"
+                        f"### Key Findings\nScout failed after {max_attempts} attempts: {e}\n"
+                        f"### Status: FAILED\n"
+                    )
+
+        # Should not reach here, but just in case
+        return scout_key, f"## Scout Report: {scout_name}\n### Status: UNKNOWN\n"
 
     # ------------------------------------------------------------------
     # Internals: module-based scouting
@@ -253,48 +309,80 @@ class ScoutRunner:
         module_map: dict[str, ModuleInfo],
         budget_ratio: float,
     ) -> dict[str, str]:
-        assignments = assign_module_scouts(module_map)
+        assignments = assign_module_scouts(module_map, budget_ratio=budget_ratio)
         print(f"[Module Scouts] {len(assignments)} scouts for {len(module_map)} modules:")
         for a in assignments:
             print(f"   {a['name']}: {a['focus_description']}")
 
-        reports: dict[str, str] = {}
-        for idx, assignment in enumerate(assignments, 1):
+        # Build tasks for parallel/sequential execution
+        scout_tasks: list[dict] = []
+        for assignment in assignments:
             scout_key = f"module_{assignment['name']}"
-            report_path = Path(f"/tmp/scout_report_{scout_key}.md")
-
-            print(f"\n[Scout {idx}/{len(assignments)}] Module: {', '.join(assignment['modules'])}...")
-
             prompt = build_module_scout_prompt(assignment, budget_ratio)
+            scout_tasks.append({
+                "key": scout_key,
+                "name": ", ".join(assignment["modules"]),
+                "prompt": prompt,
+                "assignment": assignment,
+            })
 
-            try:
-                conversation = self._Conversation(
-                    agent=self.scout_agent,
-                    workspace=str(self.repo_path),
-                    max_iteration_per_run=self._max_iters,
-                )
-                conversation.send_message(prompt)
-                conversation.run()
+        # Parallel path
+        if self._scout_pool and len(scout_tasks) >= 3:
+            return self._scout_pool.run_parallel(
+                scout_tasks=scout_tasks,
+                run_one_fn=self._run_single_module_scout,
+            )
 
-                if report_path.exists():
-                    report_content = report_path.read_text()
-                    reports[scout_key] = report_content
-                    print(f"   Report: {len(report_content)} chars")
-                else:
-                    print(f"   [Warning] No report file found at {report_path}")
-                    reports[scout_key] = (
-                        f"## Module Scout Report: {', '.join(assignment['modules'])}\n"
-                        f"### Key Findings\nNo report produced.\n"
-                    )
-
-            except Exception as e:
-                logger.error("Module scout failed: %s", e)
-                reports[scout_key] = (
-                    f"## Module Scout Report: {', '.join(assignment['modules'])}\n"
-                    f"### Key Findings\nScout failed: {e}\n"
-                )
+        # Sequential path
+        reports: dict[str, str] = {}
+        for idx, task in enumerate(scout_tasks, 1):
+            print(f"\n[Scout {idx}/{len(scout_tasks)}] Module: {task['name']}...")
+            _, report = self._run_single_module_scout(task, self.scout_agent)
+            reports[task["key"]] = report
 
         return reports
+
+    def _run_single_module_scout(
+        self, task: dict, agent: object,
+    ) -> tuple[str, str]:
+        """Run one module scout. Used by both sequential and parallel paths."""
+        import uuid
+        scout_key = task["key"]
+        prompt = task["prompt"]
+        modules_str = task["name"]
+        uid = uuid.uuid4().hex[:8]
+        report_path = Path(f"/tmp/scout_report_{scout_key}_{uid}.md")
+
+        # Rewrite prompt to use thread-safe report path
+        generic_path = f"/tmp/scout_report_{scout_key}.md"
+        prompt = prompt.replace(generic_path, str(report_path))
+
+        try:
+            conversation = self._Conversation(
+                agent=agent,
+                workspace=str(self.repo_path),
+                max_iteration_per_run=self._max_iters,
+            )
+            conversation.send_message(prompt)
+            conversation.run()
+
+            if report_path.exists():
+                report_content = report_path.read_text()
+                print(f"   Report: {len(report_content)} chars")
+                return scout_key, report_content
+            else:
+                print(f"   [Warning] No report file found at {report_path}")
+                return scout_key, (
+                    f"## Module Scout Report: {modules_str}\n"
+                    f"### Key Findings\nNo report produced.\n"
+                )
+
+        except Exception as e:
+            logger.error("Module scout failed: %s", e)
+            return scout_key, (
+                f"## Module Scout Report: {modules_str}\n"
+                f"### Key Findings\nScout failed: {e}\n"
+            )
 
     # ------------------------------------------------------------------
     # Internals: diff scout
@@ -387,11 +475,79 @@ Be thorough but concise. Focus on WHAT CHANGED, not on describing the whole code
         reports_by_key: dict[str, str],
         target_chars: int = 15000,
     ) -> dict[str, str]:
+        """Multi-pass report compression.
+
+        Each pass can reliably compress ~2-3×. For very large report sets
+        (100K+ chars), multiple passes are used with progressively stricter
+        instructions to reach the target without losing critical facts.
+        """
         if not reports_by_key:
             return reports_by_key
 
+        total_chars = sum(len(r) for r in reports_by_key.values())
+        if total_chars <= target_chars * 1.5:
+            return reports_by_key
+
+        # Determine passes needed (each pass compresses ~3×)
+        compression_ratio = total_chars / target_chars
+        if compression_ratio <= 3:
+            passes = 1
+        elif compression_ratio <= 9:
+            passes = 2
+        else:
+            passes = 3  # 27× max (3^3)
+
+        print(f"   [Compression] {total_chars:,} chars → ~{target_chars:,} target "
+              f"({compression_ratio:.1f}× ratio, {passes} pass{'es' if passes > 1 else ''})")
+
+        current = dict(reports_by_key)
+        for pass_num in range(1, passes + 1):
+            # Geometric progression: each pass targets an intermediate size
+            remaining_passes = passes - pass_num
+            pass_target = int(target_chars * (3 ** remaining_passes))
+            pass_target = min(pass_target, sum(len(r) for r in current.values()))
+
+            if pass_num > 1:
+                current_total = sum(len(r) for r in current.values())
+                print(f"   [Pass {pass_num}/{passes}] {current_total:,} → ~{pass_target:,} chars")
+
+            current = self._compress_single_pass(current, pass_target, pass_num, passes)
+
+        return current
+
+    def _compress_single_pass(
+        self,
+        reports_by_key: dict[str, str],
+        target_chars: int,
+        pass_num: int = 1,
+        total_passes: int = 1,
+    ) -> dict[str, str]:
+        """Single compression pass across all reports."""
         per_report_budget = target_chars // max(len(reports_by_key), 1)
         compressed: dict[str, str] = {}
+
+        # Stricter instructions for later passes
+        if pass_num >= total_passes and total_passes > 1:
+            instruction = (
+                f"Aggressively compress this report to ~{per_report_budget} characters. "
+                f"Keep ONLY: file names, function/class names, endpoint paths, config keys, "
+                f"architectural patterns, and technology choices. "
+                f"Remove ALL prose descriptions, commentary, and examples. "
+                f"Use terse notation: 'FastAPI REST, JWT auth, SQLAlchemy ORM' not full sentences."
+            )
+        elif pass_num > 1:
+            instruction = (
+                f"Compress this report to ~{per_report_budget} characters. "
+                f"Preserve specific facts: file names, function names, endpoints, config keys. "
+                f"Remove redundant phrasing and merge related points. Keep tables compact."
+            )
+        else:
+            instruction = (
+                f"Compress this scout report to ~{per_report_budget} characters. "
+                f"Preserve ALL specific facts: file names, function names, endpoint paths, "
+                f"config keys, library names, architecture decisions. "
+                f"Remove general commentary and redundant phrasing. Keep tables and lists."
+            )
 
         for key, report in reports_by_key.items():
             if len(report) <= per_report_budget * 1.5:
@@ -399,13 +555,7 @@ Be thorough but concise. Focus on WHAT CHANGED, not on describing the whole code
                 continue
 
             try:
-                prompt = (
-                    f"Compress this scout report to ~{per_report_budget} characters. "
-                    f"Preserve ALL specific facts: file names, function names, endpoint paths, "
-                    f"config keys, library names, architecture decisions. "
-                    f"Remove general commentary and redundant phrasing. Keep tables and lists.\n\n"
-                    f"{report}"
-                )
+                prompt = f"{instruction}\n\n{report}"
                 response = self.planner_llm.completion(
                     messages=[self._Message(role="user", content=[self._TextContent(text=prompt)])],
                 )
@@ -432,14 +582,32 @@ Be thorough but concise. Focus on WHAT CHANGED, not on describing the whole code
 def build_file_manifest_section(
     manifest: list[tuple[str, int]],
     scout_key: str,
-    max_lines: int = 100,
+    max_lines: int | None = None,
+    budget_ratio: float = 1.0,
+    total_files: int = 0,
 ) -> str:
     """Format the file manifest into a prompt section with focus hints.
 
     Files matching the scout's focus patterns are marked with ★.
+
+    When *max_lines* is ``None`` (default), the limit is computed
+    dynamically from *budget_ratio* so that larger repos get a
+    proportionally larger view while still fitting in context.
     """
     if not manifest:
         return "FILE MANIFEST: (empty repository)\n"
+
+    # Dynamic max_lines based on budget_ratio when not explicitly set
+    if max_lines is None:
+        n = total_files or len(manifest)
+        if budget_ratio < 0.3:
+            max_lines = min(n, 500)
+        elif budget_ratio < 1.0:
+            max_lines = min(n, 300)
+        elif budget_ratio < 3.0:
+            max_lines = min(n, 200)
+        else:
+            max_lines = min(n, 150)
 
     focus = SCOUT_FOCUS.get(scout_key, {})
     focus_patterns = focus.get("patterns", [])
@@ -448,6 +616,10 @@ def build_file_manifest_section(
     def _is_focus(path: str) -> bool:
         path_lower = path.lower()
         return any(p.lower() in path_lower for p in focus_patterns)
+
+    def _is_entry(path: str) -> bool:
+        fname = Path(path).name
+        return any(fname.startswith(p.rstrip(".")) or fname == p for p in ENTRY_POINT_PATTERNS)
 
     def _fmt_size(b: int) -> str:
         if b < 1024:
@@ -472,13 +644,52 @@ def build_file_manifest_section(
     )
 
     if len(lines) > max_lines:
+        # Priority order: focus files → entry points → largest files →
+        # one representative per top-level directory
         focus_lines = [l for l in lines if l.strip().startswith("★")]
-        other_entries = [(p, s) for p, s in manifest if not _is_focus(p)]
-        other_entries.sort(key=lambda x: -x[1])
         remaining = max_lines - len(focus_lines) - 2
-        other_lines = [f"    {p} — {_fmt_size(s)}" for p, s in other_entries[:max(0, remaining)]]
-        omitted = len(lines) - len(focus_lines) - len(other_lines)
-        body = "\n".join(focus_lines + other_lines)
+
+        # Entry points (not already in focus)
+        entry_entries = [
+            (p, s) for p, s in manifest
+            if _is_entry(p) and not _is_focus(p)
+        ]
+        entry_entries.sort(key=lambda x: -x[1])
+        entry_lines = [f"  ▸ {p} — {_fmt_size(s)}" for p, s in entry_entries[:max(0, remaining)]]
+        remaining -= len(entry_lines)
+
+        # Largest non-focus, non-entry files
+        other_entries = [
+            (p, s) for p, s in manifest
+            if not _is_focus(p) and not _is_entry(p)
+        ]
+        other_entries.sort(key=lambda x: -x[1])
+
+        # Reserve slots for directory representatives
+        dir_reserve = min(remaining // 3, 20) if remaining > 10 else 0
+        size_slots = max(0, remaining - dir_reserve)
+        size_lines = [f"    {p} — {_fmt_size(s)}" for p, s in other_entries[:size_slots]]
+
+        # One representative per top-level directory not yet covered
+        covered_dirs: set[str] = set()
+        for p, _ in manifest:
+            if _is_focus(p) or _is_entry(p):
+                td = p.split(os.sep)[0] if os.sep in p else "."
+                covered_dirs.add(td)
+        for p, s in other_entries[:size_slots]:
+            td = p.split(os.sep)[0] if os.sep in p else "."
+            covered_dirs.add(td)
+
+        dir_lines: list[str] = []
+        for p, s in other_entries[size_slots:]:
+            td = p.split(os.sep)[0] if os.sep in p else "."
+            if td not in covered_dirs and len(dir_lines) < dir_reserve:
+                dir_lines.append(f"    {p} — {_fmt_size(s)}")
+                covered_dirs.add(td)
+
+        all_selected = focus_lines + entry_lines + size_lines + dir_lines
+        omitted = len(lines) - len(all_selected)
+        body = "\n".join(all_selected)
         if omitted > 0:
             body += f"\n  ... and {omitted} more files"
     else:
@@ -508,9 +719,21 @@ def build_constraints(budget_ratio: float) -> str:
 
 def assign_module_scouts(
     module_map: dict[str, ModuleInfo],
-    max_scouts: int = 8,
+    max_scouts: int | None = None,
+    budget_ratio: float = 1.0,
 ) -> list[dict]:
-    """Create per-module scout assignments using bin-packing."""
+    """Create per-module scout assignments using locality-aware bin-packing.
+
+    When *max_scouts* is ``None``, the count is computed dynamically
+    from the module count and ``SCOUT_PARALLEL`` env var so that the
+    number of scouts scales with repository complexity.
+    """
+    if max_scouts is None:
+        parallel_limit = int(os.getenv("SCOUT_PARALLEL", "4"))
+        # Allow up to 3 waves of parallel scouts
+        max_scouts = min(len(module_map), parallel_limit * 3)
+        max_scouts = max(4, max_scouts)  # floor of 4
+
     sorted_modules = sorted(
         module_map.items(), key=lambda x: -x[1].total_bytes
     )
@@ -531,16 +754,35 @@ def assign_module_scouts(
             for mod_name, mod_info in sorted_modules
         ]
 
+    # Locality-aware bin-packing: prefer grouping modules that share
+    # a parent directory into the same bucket for better coherence.
     buckets: list[dict] = [
-        {"name": "", "modules": [], "files": [], "total_bytes": 0, "focus_description": ""}
+        {"name": "", "modules": [], "files": [], "total_bytes": 0,
+         "focus_description": "", "parents": set()}
         for _ in range(max_scouts)
     ]
 
     for mod_name, mod_info in sorted_modules:
-        smallest = min(buckets, key=lambda b: b["total_bytes"])
-        smallest["modules"].append(mod_name)
-        smallest["files"].extend(mod_info.files)
-        smallest["total_bytes"] += mod_info.total_bytes
+        parent = mod_name.split("/")[0] if "/" in mod_name else mod_name
+
+        # First try: find a bucket that already has a module from the same parent
+        # AND is not the largest bucket (avoid overloading)
+        best = None
+        for b in buckets:
+            if parent in b["parents"]:
+                if best is None or b["total_bytes"] < best["total_bytes"]:
+                    best = b
+
+        # If no locality match or the matched bucket is already too large
+        # (> 2× average), use the smallest bucket instead
+        avg_bytes = sum(b["total_bytes"] for b in buckets) / max(len(buckets), 1)
+        if best is None or (best["total_bytes"] > avg_bytes * 2 and avg_bytes > 0):
+            best = min(buckets, key=lambda b: b["total_bytes"])
+
+        best["modules"].append(mod_name)
+        best["files"].extend(mod_info.files)
+        best["total_bytes"] += mod_info.total_bytes
+        best["parents"].add(parent)
 
     assignments = []
     for bucket in buckets:
@@ -553,6 +795,8 @@ def assign_module_scouts(
             f"Modules: {mod_names} ({len(bucket['files'])} files, "
             f"~{bucket['total_bytes'] // 4:,} tokens)"
         )
+        # Remove internal tracking field before returning
+        bucket.pop("parents", None)
         assignments.append(bucket)
 
     return assignments

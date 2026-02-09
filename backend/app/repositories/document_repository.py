@@ -5,6 +5,8 @@ Every read query uses _base_query() to exclude soft-deleted documents,
 so callers never need to think about the deleted_at column.
 """
 
+import re
+
 from sqlalchemy.orm import Query
 from sqlalchemy import text, or_
 import sqlalchemy.exc
@@ -269,7 +271,8 @@ class DocumentRepository(BaseRepository[Document]):
             search_query = query.strip()
             if search_query and not any(c in search_query for c in ['&', '|', '!', ':']):
                 # Convert simple query to tsquery format with prefix matching
-                terms = search_query.split()
+                # Strip punctuation from each term for tsquery compatibility
+                terms = [re.sub(r'[^\w]', '', t) for t in search_query.split()]
                 search_query = ' & '.join(f"{t}:*" for t in terms if t)
 
             sql = """

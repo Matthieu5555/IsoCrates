@@ -10,6 +10,7 @@ after detail pages complete since hub pages reference them.
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
@@ -137,13 +138,31 @@ class WriterPool:
             else:
                 id_stats["new"] += 1
 
+        max_attempts = 2
+
         def _run_one(
             doc_spec: dict, idx: int, agent: Agent
         ) -> tuple[str, dict]:
-            """Run a single writer in a thread. Returns (title, result)."""
-            print(f"\n[{idx}/{total}] Dispatching writer for: {doc_spec['title']}")
-            result = generate_fn(doc_spec, agent)
-            return doc_spec["title"], result
+            """Run a single writer in a thread with retry. Returns (title, result)."""
+            title = doc_spec["title"]
+            for attempt in range(1, max_attempts + 1):
+                print(f"\n[{idx}/{total}] Dispatching writer for: {title}"
+                      + (f" (attempt {attempt})" if attempt > 1 else ""))
+                result = generate_fn(doc_spec, agent)
+                status = result.get("status", "")
+                if status not in ("error", "error_fallback", "warning"):
+                    return title, result
+                # Retry on failure with a fresh agent
+                if attempt < max_attempts:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "Writer for %s failed (attempt %d/%d), retrying in %ds: %s",
+                        title, attempt, max_attempts, wait, result.get("error", "unknown"),
+                    )
+                    print(f"   [Retry] Writer for {title} failed, retrying in {wait}s...")
+                    time.sleep(wait)
+                    agent = self.create_writer_agent()
+            return title, result
 
         # Wave 1: Detail pages in parallel
         if detail_docs:

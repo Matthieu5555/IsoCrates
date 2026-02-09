@@ -4,8 +4,13 @@ Model configuration and constraint resolution.
 Single source of truth for LLM model limits and provider-specific parameters.
 Litellm's model registry is often wrong for OpenRouter-hosted models (e.g.,
 reporting 262K max_output for kimi-k2.5 which only supports 8K). This module
-provides an override table for known models and falls back to litellm /
-conservative defaults.
+provides an override table for known models and falls back to litellm.
+
+If a model is not in the override table AND litellm cannot resolve it,
+resolve_model_config() raises ModelConfigError rather than silently returning
+conservative defaults. Wrong context_window values cascade into incorrect
+budget ratios, condenser sizing, and scout constraints — silent fallback
+here causes subtle quality degradation with no indication of the cause.
 
 Provider-specific quirks (e.g., Kimi's thinking mode) live here — not in the
 agent code. The agent constructs LLMs using config values, so swapping models
@@ -14,8 +19,20 @@ never requires touching agent code.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger("isocrates.agent")
+
+
+class ModelConfigError(ValueError):
+    """Model not found in override table or litellm registry.
+
+    Raised by resolve_model_config() when a model string cannot be resolved
+    to a known configuration. The error message includes the model name,
+    available overrides, and instructions for adding a new entry.
+    """
 
 
 @dataclass(frozen=True)
@@ -111,7 +128,7 @@ def _strip_provider_prefix(model: str) -> str:
         'ollama/qwen3-coder:30b'          → 'qwen3-coder:30b'
         'mistralai/devstral-2512'         → 'mistralai/devstral-2512'
     """
-    PROVIDER_PREFIXES = ("openrouter/", "ollama/", "ollama_chat/", "litellm_proxy/", "hosted_vllm/")
+    PROVIDER_PREFIXES = ("openrouter/", "openai/", "ollama/", "ollama_chat/", "litellm_proxy/", "hosted_vllm/")
     for prefix in PROVIDER_PREFIXES:
         if model.startswith(prefix):
             return model[len(prefix):]
@@ -124,7 +141,11 @@ def resolve_model_config(model: str) -> ModelConfig:
     Resolution order:
     1. Check override table (exact match after stripping provider prefix)
     2. Query litellm's model registry
-    3. Fall back to conservative defaults
+    3. Raise ModelConfigError — no silent defaults
+
+    Raises:
+        ModelConfigError: If the model is not in the override table and
+            litellm cannot resolve it. Lists available models in the message.
     """
     bare = _strip_provider_prefix(model)
 
@@ -147,8 +168,14 @@ def resolve_model_config(model: str) -> ModelConfig:
                 max_output_tokens=out,
                 supports_tool_calling=info.get("supports_function_calling", True),
             )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("litellm lookup failed for '%s': %s", model, e)
 
-    # 3. Conservative default
-    return _DEFAULT_CONFIG
+    # 3. No silent defaults — fail explicitly so the user knows.
+    available = ", ".join(sorted(MODEL_OVERRIDES.keys()))
+    raise ModelConfigError(
+        f"Model '{model}' (bare: '{bare}') not found in override table or litellm registry. "
+        f"The system cannot determine context_window and max_output_tokens for this model.\n"
+        f"Add an entry to MODEL_OVERRIDES in agent/model_config.py.\n"
+        f"Known models: {available}"
+    )

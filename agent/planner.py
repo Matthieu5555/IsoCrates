@@ -9,7 +9,7 @@ import logging
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from prompts import DOCUMENT_TYPES
 
@@ -94,8 +94,7 @@ class DocumentPlanner:
         # SDK types injected
         message_cls: type,
         text_content_cls: type,
-        # For fallback plan — repo metrics
-        get_repo_metrics: Callable[[], dict[str, Any]],
+        context_budget: int = 131_072,
     ) -> None:
         self.planner_llm = planner_llm
         self.repo_name = repo_name
@@ -103,7 +102,7 @@ class DocumentPlanner:
         self.notes_dir = notes_dir
         self._Message = message_cls
         self._TextContent = text_content_cls
-        self._get_repo_metrics = get_repo_metrics
+        self._context_budget = context_budget
 
     def plan(
         self,
@@ -316,128 +315,261 @@ CRITICAL RULES:
 """
 
         print("[Planner] Analyzing scout reports and designing blueprint...")
-        try:
-            response = self.planner_llm.completion(
-                messages=[
+        max_retries = 3
+        last_error = None
+        last_raw = ""
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                messages = [
                     self._Message(role="user", content=[self._TextContent(text=planner_prompt)])
-                ],
-            )
+                ]
+                # On retry, feed back the failed response and ask for valid JSON
+                if attempt > 1 and last_raw:
+                    messages.append(self._Message(role="assistant", content=[self._TextContent(text=last_raw)]))
+                    messages.append(self._Message(role="user", content=[self._TextContent(
+                        text=f"Your response was not valid JSON. Error: {last_error}\n\n"
+                             "Please output ONLY a valid JSON object with the exact schema requested. "
+                             "No markdown fences, no commentary, no text before or after the JSON."
+                    )]))
 
-            raw_text = ""
-            for block in response.message.content:
-                if hasattr(block, "text"):
-                    raw_text += block.text
+                response = self.planner_llm.completion(messages=messages)
 
-            json_text = raw_text.strip()
-            if json_text.startswith("```"):
-                json_text = re.sub(r"^```(?:json)?\s*\n?", "", json_text)
-                json_text = re.sub(r"\n?```\s*$", "", json_text)
+                raw_text = ""
+                for block in response.message.content:
+                    if hasattr(block, "text"):
+                        raw_text += block.text
 
-            from json_repair import repair_json
-            blueprint = json.loads(repair_json(json_text))
+                json_text = raw_text.strip()
+                if json_text.startswith("```"):
+                    json_text = re.sub(r"^```(?:json)?\s*\n?", "", json_text)
+                    json_text = re.sub(r"\n?```\s*$", "", json_text)
 
-            if isinstance(blueprint, dict) and "documents" in blueprint:
-                docs = blueprint["documents"]
-                for doc in docs:
-                    if "path" not in doc:
-                        doc["path"] = crate_path
-                docs = _flatten_single_doc_folders(docs, crate_path)
-                blueprint["documents"] = docs
-                print(f"[Planner] Blueprint ready: {len(docs)} documents")
-                print(f"   Complexity: {blueprint.get('complexity', 'unknown')}")
-                print(f"   Journey: {blueprint.get('reader_journey', 'N/A')}")
-                for doc in docs:
-                    rationale = doc.get("rationale", "")
-                    print(f"   - {doc['title']} ({doc['doc_type']}): {rationale[:60]}...")
-                return blueprint
+                from json_repair import repair_json
+                blueprint = json.loads(repair_json(json_text))
 
-            print("[Planner] Response was not a valid blueprint, using fallback")
-        except json.JSONDecodeError as e:
-            print(f"[Planner] Failed to parse JSON ({e}), using fallback")
-        except Exception as e:
-            logger.error("Planning failed (%s), using fallback", e)
+                if isinstance(blueprint, dict) and "documents" in blueprint:
+                    docs = blueprint["documents"]
+                    for doc in docs:
+                        if "path" not in doc:
+                            doc["path"] = crate_path
+                    docs = _flatten_single_doc_folders(docs, crate_path)
+                    blueprint["documents"] = docs
+                    print(f"[Planner] Blueprint ready: {len(docs)} documents")
+                    print(f"   Complexity: {blueprint.get('complexity', 'unknown')}")
+                    print(f"   Journey: {blueprint.get('reader_journey', 'N/A')}")
+                    for doc in docs:
+                        rationale = doc.get("rationale", "")
+                        print(f"   - {doc['title']} ({doc['doc_type']}): {rationale[:60]}...")
+                    return blueprint
 
-        return self.fallback_plan(crate_path)
+                last_raw = raw_text
+                last_error = "Response was valid JSON but missing 'documents' key"
+                print(f"[Planner] Attempt {attempt}/{max_retries}: invalid blueprint structure, retrying...")
 
-    def fallback_plan(self, crate_path: str) -> dict:
-        """Deterministic fallback when planner fails."""
-        metrics = self._get_repo_metrics()
-        complexity = metrics["size_label"]
+            except json.JSONDecodeError as e:
+                last_raw = raw_text
+                last_error = str(e)
+                print(f"[Planner] Attempt {attempt}/{max_retries}: JSON parse error ({e}), retrying...")
+            except Exception as e:
+                last_error = str(e)
+                last_raw = ""
+                print(f"[Planner] Attempt {attempt}/{max_retries}: {e}, retrying...")
 
-        all_titles: list[str] = []
-        documents: list[dict] = []
+        raise RuntimeError(
+            f"Planner failed after {max_retries} attempts. Last error: {last_error}"
+        )
 
-        core_pages = [
-            {"doc_type": "overview", "title": "Overview", "path": crate_path,
-             "description": "High-level overview of the project, its purpose, and how its components fit together. Start here to orient yourself.",
-             "sections": [
-                 {"heading": "What is this project?", "rich_content": ["diagram:system overview"]},
-                 {"heading": "Key Components", "rich_content": ["table:components"]},
-             ], "key_files_to_read": ["README.md"]},
-            {"doc_type": "capabilities", "title": "Capabilities & User Stories", "path": crate_path,
-             "description": "Business-facing document describing what users can do with this tool, including user stories, feature matrix, and key workflows.",
-             "sections": [
-                 {"heading": "User Stories", "rich_content": []},
-                 {"heading": "Feature Matrix", "rich_content": ["table:capabilities"]},
-                 {"heading": "Key Workflows", "rich_content": ["diagram:user workflows"]},
-             ], "key_files_to_read": ["README.md"]},
-            {"doc_type": "quickstart", "title": "Getting Started", "path": f"{crate_path}/getting-started",
-             "description": "Step-by-step guide to install prerequisites, set up the project, and get it running locally in under 5 minutes.",
-             "sections": [
-                 {"heading": "Prerequisites", "rich_content": ["table:requirements"]},
-                 {"heading": "Installation", "rich_content": ["code:install"]},
-             ], "key_files_to_read": ["README.md"]},
-            {"doc_type": "architecture", "title": "Architecture", "path": f"{crate_path}/architecture",
-             "description": "System architecture and design decisions, including component interactions, data flow, and technology choices.",
-             "sections": [
-                 {"heading": "System Design", "rich_content": ["diagram:architecture"]},
-                 {"heading": "Components", "rich_content": ["table:components"]},
-             ], "key_files_to_read": ["README.md"]},
-            {"doc_type": "api", "title": "API Reference", "path": f"{crate_path}/api",
-             "description": "Complete API endpoint reference with request/response formats, authentication requirements, and usage examples.",
-             "sections": [
-                 {"heading": "Endpoints", "rich_content": ["table:endpoints"]},
-             ], "key_files_to_read": ["README.md"]},
-        ]
+    def plan_hierarchical(
+        self,
+        reports_by_key: dict[str, str],
+        existing_docs: list[dict] | None = None,
+    ) -> dict:
+        """Two-phase planning for large report sets that exceed context budget.
 
-        if complexity in ("medium", "large"):
-            core_pages.extend([
-                {"doc_type": "config", "title": "Configuration", "path": f"{crate_path}/config",
-                 "description": "All configuration options including environment variables, feature flags, and provider settings.",
-                 "sections": [
-                     {"heading": "Environment Variables", "rich_content": ["table:env vars"]},
-                 ], "key_files_to_read": ["README.md"]},
-                {"doc_type": "guide", "title": "User Guide", "path": f"{crate_path}/guide",
-                 "description": "Hands-on guide walking through core workflows and common tasks from a user's perspective.",
-                 "sections": [
-                     {"heading": "Core Workflow", "rich_content": ["diagram:workflow"]},
-                 ], "key_files_to_read": ["README.md"]},
-            ])
+        Phase 1: Groups reports into chunks that fit within ~50% of context,
+                 producing per-group mini-plans (partial document lists).
+        Phase 2: Merges mini-plans into a coherent global blueprint,
+                 deduplicating and ensuring mandatory pages exist.
 
-        if complexity == "large":
-            core_pages.extend([
-                {"doc_type": "data-model", "title": "Data Model", "path": f"{crate_path}/architecture/data-model",
-                 "description": "Database schema, entity relationships, and data flow between tables. Covers both SQLite and PostgreSQL variants.",
-                 "sections": [
-                     {"heading": "Schema", "rich_content": ["diagram:ER diagram"]},
-                 ], "key_files_to_read": ["README.md"]},
-                {"doc_type": "contributing", "title": "Contributing", "path": f"{crate_path}/contributing",
-                 "description": "Developer onboarding: how to set up a local development environment, run tests, and submit contributions.",
-                 "sections": [
-                     {"heading": "Development Setup", "rich_content": ["code:setup"]},
-                 ], "key_files_to_read": ["README.md"]},
-            ])
+        Falls back to single-pass ``plan()`` if report set is small enough.
+        """
+        total_report_tokens = sum(len(r) for r in reports_by_key.values()) // 4
+        threshold = int(self._context_budget * 0.7)
 
-        all_titles = [p["title"] for p in core_pages]
-        for page in core_pages:
-            page["wikilinks_out"] = [t for t in all_titles if t != page["title"]]
-            documents.append(page)
+        # If reports fit in context, delegate to single-pass plan()
+        if total_report_tokens <= threshold:
+            combined = "\n\n---\n\n".join(reports_by_key.values())
+            return self.plan(combined, existing_docs)
 
-        return {
-            "repo_summary": f"Repository {self.repo_name}",
-            "complexity": complexity,
-            "documents": documents,
-        }
+        print(f"[Planner] Reports exceed context ({total_report_tokens:,} tokens > "
+              f"{threshold:,} threshold) — using hierarchical planning")
+
+        crate_path = f"{self.crate}{self.repo_name}".rstrip("/")
+
+        # Phase 1: Group reports into chunks and produce mini-plans
+        chunk_budget_chars = int(self._context_budget * 0.5 * 4)  # 50% of context in chars
+        chunks: list[list[str]] = []
+        current_chunk: list[str] = []
+        current_size = 0
+
+        for key, report in reports_by_key.items():
+            if current_size + len(report) > chunk_budget_chars and current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = []
+                current_size = 0
+            current_chunk.append(report)
+            current_size += len(report)
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        print(f"[Planner] Phase 1: {len(chunks)} report groups → mini-plans")
+
+        mini_plans: list[list[dict]] = []
+        for i, chunk in enumerate(chunks, 1):
+            chunk_text = "\n\n---\n\n".join(chunk)
+            mini_prompt = f"""You are a documentation architect. Based on these scout reports about
+a SUBSET of a codebase, suggest 3-8 focused wiki pages that should be written.
+
+SCOUT REPORTS (subset {i}/{len(chunks)}):
+{chunk_text}
+
+Base path for documents: "{crate_path}"
+
+Output ONLY a JSON array of document specs. Each spec must have:
+  "doc_type", "title", "path", "description" (2-3 sentences),
+  "sections" (list of {{"heading": "...", "rich_content": []}}),
+  "key_files_to_read" (list of file paths)
+
+Output ONLY the JSON array — no markdown fences, no commentary.
+"""
+            try:
+                response = self.planner_llm.completion(
+                    messages=[self._Message(role="user", content=[self._TextContent(text=mini_prompt)])],
+                )
+                raw = ""
+                for block in response.message.content:
+                    if hasattr(block, "text"):
+                        raw += block.text
+                raw = raw.strip()
+                if raw.startswith("```"):
+                    raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
+                    raw = re.sub(r"\n?```\s*$", "", raw)
+
+                from json_repair import repair_json
+                docs = json.loads(repair_json(raw))
+                if isinstance(docs, list):
+                    mini_plans.append(docs)
+                    print(f"   [Group {i}] {len(docs)} document specs")
+                elif isinstance(docs, dict) and "documents" in docs:
+                    mini_plans.append(docs["documents"])
+                    print(f"   [Group {i}] {len(docs['documents'])} document specs")
+                else:
+                    print(f"   [Group {i}] Unexpected response format, skipping")
+            except Exception as e:
+                logger.warning("Mini-plan %d failed: %s", i, e)
+                print(f"   [Group {i}] Failed: {e}")
+
+        if not mini_plans:
+            print("[Planner] All mini-plans failed, falling back to single-pass")
+            combined = "\n\n---\n\n".join(reports_by_key.values())
+            return self.plan(combined, existing_docs)
+
+        # Phase 2: Merge mini-plans into a coherent global blueprint
+        all_specs = [doc for group in mini_plans for doc in group]
+        specs_json = json.dumps(all_specs, indent=2)
+
+        existing_section = ""
+        if existing_docs:
+            existing_section = "\nEXISTING DOCUMENTS (reuse titles/paths where possible):\n"
+            for doc in existing_docs:
+                existing_section += f'  - "{doc["title"]}" at "{doc["path"]}" ({doc["doc_type"]})\n'
+
+        merge_prompt = f"""You are a documentation architect. Multiple scouts explored different parts
+of a large codebase and produced these document suggestions independently.
+Merge them into ONE coherent documentation blueprint.
+
+DOCUMENT SUGGESTIONS FROM SCOUTS:
+{specs_json}
+{existing_section}
+YOUR TASKS:
+1. DEDUPLICATE: Remove duplicate or overlapping document specs
+2. ENSURE MANDATORY PAGES: Must include "Overview", "Getting Started",
+   "Capabilities & User Stories" at path "{crate_path}"
+3. ADD WIKILINKS: For each document, add "wikilinks_out" listing 5-15
+   other page titles it should reference
+4. HARMONIZE PATHS: Ensure consistent folder structure under "{crate_path}"
+5. ADD REPO SUMMARY: One paragraph describing the whole project
+
+Output ONLY a valid JSON object:
+{{
+  "repo_summary": "...",
+  "complexity": "large",
+  "reader_journey": "Overview → Getting Started → ...",
+  "documents": [ ... ]
+}}
+
+Each document must have: doc_type, title, path, description, sections,
+key_files_to_read, wikilinks_out. Output ONLY JSON — no fences, no commentary.
+"""
+        print(f"[Planner] Phase 2: Merging {len(all_specs)} specs into global blueprint...")
+        max_retries = 3
+        last_error = None
+        last_raw = ""
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                messages = [
+                    self._Message(role="user", content=[self._TextContent(text=merge_prompt)])
+                ]
+                if attempt > 1 and last_raw:
+                    messages.append(self._Message(role="assistant", content=[self._TextContent(text=last_raw)]))
+                    messages.append(self._Message(role="user", content=[self._TextContent(
+                        text=f"Your response was not valid JSON. Error: {last_error}\n\n"
+                             "Please output ONLY a valid JSON object with the exact schema requested. "
+                             "No markdown fences, no commentary, no text before or after the JSON."
+                    )]))
+
+                response = self.planner_llm.completion(messages=messages)
+                raw = ""
+                for block in response.message.content:
+                    if hasattr(block, "text"):
+                        raw += block.text
+                raw = raw.strip()
+                if raw.startswith("```"):
+                    raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
+                    raw = re.sub(r"\n?```\s*$", "", raw)
+
+                from json_repair import repair_json
+                blueprint = json.loads(repair_json(raw))
+
+                if isinstance(blueprint, dict) and "documents" in blueprint:
+                    docs = blueprint["documents"]
+                    for doc in docs:
+                        if "path" not in doc:
+                            doc["path"] = crate_path
+                    docs = _flatten_single_doc_folders(docs, crate_path)
+                    blueprint["documents"] = docs
+                    print(f"[Planner] Hierarchical blueprint ready: {len(docs)} documents")
+                    return blueprint
+
+                last_raw = raw
+                last_error = "Response was valid JSON but missing 'documents' key"
+                print(f"[Planner] Merge attempt {attempt}/{max_retries}: invalid structure, retrying...")
+
+            except json.JSONDecodeError as e:
+                last_raw = raw
+                last_error = str(e)
+                print(f"[Planner] Merge attempt {attempt}/{max_retries}: JSON parse error ({e}), retrying...")
+            except Exception as e:
+                last_error = str(e)
+                last_raw = ""
+                print(f"[Planner] Merge attempt {attempt}/{max_retries}: {e}, retrying...")
+
+        raise RuntimeError(
+            f"Planner merge failed after {max_retries} attempts. Last error: {last_error}"
+        )
+
 
 
 # ---------------------------------------------------------------------------

@@ -167,6 +167,25 @@ def format_write_result(doc: dict, action: str) -> str:
     return "\n".join(lines)
 
 
+def format_ask_response(result: dict) -> str:
+    """Format a RAG chat response with answer and source citations."""
+    answer = result.get("answer", "No answer generated.")
+    sources = result.get("sources", [])
+    model = result.get("model", "")
+
+    lines = [answer, ""]
+
+    if sources:
+        lines.append("---")
+        lines.append(f"**Sources** ({len(sources)} documents, model: {model}):")
+        for src in sources:
+            title = src.get("title", "Untitled")
+            path = src.get("path", "")
+            lines.append(f"- [[{title}]] ({path})")
+
+    return "\n".join(lines)
+
+
 def format_related(doc_title: str, deps: dict, title_cache: dict[str, str]) -> str:
     """Format dependency graph as incoming/outgoing wikilinks."""
     outgoing = deps.get("outgoing", [])

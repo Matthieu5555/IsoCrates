@@ -43,6 +43,7 @@ class RepoAnalysis:
     top_dirs: dict[str, int]
     module_map: dict[str, ModuleInfo]
     module_count: int
+    crates: list[dict] = dataclasses.field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,23 @@ SOURCE_EXTS: set[str] = {
 SKIP_NAMES: set[str] = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "uv.lock",
     "Cargo.lock", "poetry.lock",
+}
+
+# Package manifest files that indicate a module or sub-project boundary.
+# Used by _detect_module_boundaries() for intelligent module grouping and
+# by detect_crates() for automatic sub-project discovery.
+MODULE_MARKERS: set[str] = {
+    "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "setup.py",
+    "pom.xml", "build.gradle", "Gemfile", "composer.json",
+    "CMakeLists.txt", "Package.swift",
+}
+
+# Subset of MODULE_MARKERS used for crate (independent sub-project) detection.
+# Excludes language-internal markers (__init__.py, mod.rs) that indicate
+# modules within a project rather than independent projects.
+CRATE_MARKERS: set[str] = {
+    "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "setup.py",
+    "pom.xml", "build.gradle", "Gemfile", "composer.json",
 }
 
 
@@ -90,6 +108,7 @@ def analyze_repository(repo_path: Path, crate: str = "") -> RepoAnalysis:
         size_label = "large"
 
     module_map = _build_module_map(file_manifest, repo_path)
+    crates = detect_crates(repo_path)
 
     return RepoAnalysis(
         file_manifest=file_manifest,
@@ -100,6 +119,7 @@ def analyze_repository(repo_path: Path, crate: str = "") -> RepoAnalysis:
         top_dirs=dict(sorted(top_dirs.items(), key=lambda x: -x[1])),
         module_map=module_map,
         module_count=len(module_map),
+        crates=crates,
     )
 
 
@@ -149,30 +169,87 @@ def _walk_files(
     return file_manifest, total_bytes, top_dirs
 
 
+def _detect_module_boundaries(
+    file_manifest: list[tuple[str, int]],
+    repo_path: Path,
+) -> dict[str, str]:
+    """Map each file to its module based on nearest ancestor with a marker.
+
+    For each file, walks up the directory tree looking for a MODULE_MARKERS
+    file. The directory containing the nearest marker becomes the module
+    boundary. Falls back to the first-2-path-segments heuristic when no
+    marker is found within 4 ancestor levels.
+
+    Returns {relative_file_path: module_name}.
+    """
+    # Cache: directory path → module name (or None if no marker found)
+    _dir_cache: dict[str, str | None] = {}
+
+    def _find_module_for_dir(rel_dir: str) -> str | None:
+        """Walk up from *rel_dir* looking for a marker file."""
+        if rel_dir in _dir_cache:
+            return _dir_cache[rel_dir]
+
+        parts = Path(rel_dir).parts if rel_dir != "." else ()
+        # Check up to 4 ancestor levels (including the dir itself)
+        for depth in range(len(parts), max(len(parts) - 4, -1), -1):
+            ancestor = str(Path(*parts[:depth])) if depth > 0 else "."
+            if ancestor in _dir_cache:
+                result = _dir_cache[ancestor]
+                # Cache the original path too
+                _dir_cache[rel_dir] = result
+                return result
+
+            abs_ancestor = repo_path / ancestor if ancestor != "." else repo_path
+            for marker in MODULE_MARKERS:
+                if (abs_ancestor / marker).exists():
+                    mod_name = ancestor if ancestor != "." else "."
+                    _dir_cache[ancestor] = mod_name
+                    _dir_cache[rel_dir] = mod_name
+                    return mod_name
+
+        _dir_cache[rel_dir] = None
+        return None
+
+    result: dict[str, str] = {}
+    for fpath, _ in file_manifest:
+        rel_dir = str(Path(fpath).parent) if str(Path(fpath).parent) != "." else "."
+        module = _find_module_for_dir(rel_dir)
+        if module is not None:
+            result[fpath] = module
+        else:
+            # Fallback: first 2 path segments
+            parts = Path(fpath).parts
+            if len(parts) >= 2:
+                result[fpath] = f"{parts[0]}/{parts[1]}"
+            else:
+                result[fpath] = "."
+    return result
+
+
 def _build_module_map(
     file_manifest: list[tuple[str, int]],
     repo_path: Path,
 ) -> dict[str, ModuleInfo]:
-    """Group files into logical modules based on directory structure.
+    """Group files into logical modules using marker-based boundary detection.
 
-    Uses the first 2 path segments as module boundary (e.g. "backend/app").
-    Modules with fewer than 3 files are merged into their parent.
+    First tries to detect module boundaries from package manifest files
+    (package.json, Cargo.toml, etc.). Falls back to first-2-path-segments
+    heuristic for files without nearby markers. Modules with fewer than
+    3 files are merged into their parent.
     """
-    # Group by first 2 path segments
+    boundaries = _detect_module_boundaries(file_manifest, repo_path)
+
     raw_groups: dict[str, list[tuple[str, int]]] = {}
     for fpath, fsize in file_manifest:
-        parts = Path(fpath).parts
-        if len(parts) >= 2:
-            module_name = f"{parts[0]}/{parts[1]}"
-        else:
-            module_name = "."
+        module_name = boundaries.get(fpath, ".")
         raw_groups.setdefault(module_name, []).append((fpath, fsize))
 
     # Merge small modules (< 3 files) into parent
     merged: dict[str, list[tuple[str, int]]] = {}
     for mod_name, files in raw_groups.items():
         if len(files) < 3 and mod_name != ".":
-            parent = mod_name.split("/")[0]
+            parent = mod_name.split("/")[0] if "/" in mod_name else "."
             merged.setdefault(parent, []).extend(files)
         else:
             merged.setdefault(mod_name, []).extend(files)
@@ -266,3 +343,60 @@ def _build_import_graph(
                             mod_info.imports_from.add(target_mod)
                             modules[target_mod].imported_by.add(mod_name)
                             break
+
+
+def detect_crates(repo_path: Path) -> list[dict]:
+    """Detect independent sub-projects (crates) within a repository.
+
+    Walks the repo looking for CRATE_MARKERS (package.json, Cargo.toml,
+    go.mod, etc.) in subdirectories. The root project marker is excluded
+    since it represents the repo itself, not a sub-project.
+
+    Deduplication: if both ``backend/package.json`` and
+    ``backend/api/package.json`` exist, keeps only the shallower one
+    (the deeper one is considered an internal module, not a separate crate).
+
+    Returns a list of dicts: ``[{"path": "packages/api", "marker": "package.json", "name": "api"}]``.
+    """
+    crates: list[dict] = []
+    crate_paths: set[str] = set()
+
+    try:
+        for root, dirs, files in os.walk(repo_path):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            rel_root = os.path.relpath(root, str(repo_path))
+            if rel_root == ".":
+                continue  # skip root — it's the repo itself, not a crate
+
+            for fname in files:
+                if fname in CRATE_MARKERS:
+                    crate_paths.add(rel_root)
+                    break  # one marker per directory is enough
+
+    except OSError as e:
+        logger.warning("Crate detection walk failed: %s", e)
+        return []
+
+    if not crate_paths:
+        return []
+
+    # Dedup: remove crates whose ancestor is also a crate.
+    # Sort by depth (shallowest first) so ancestors are processed first.
+    sorted_paths = sorted(crate_paths, key=lambda p: p.count(os.sep))
+    kept: list[str] = []
+    for cp in sorted_paths:
+        if any(cp.startswith(ancestor + os.sep) for ancestor in kept):
+            continue  # deeper path is a sub-module of an already-kept crate
+        kept.append(cp)
+
+    for cp in kept:
+        # Find which marker was in this directory
+        marker = ""
+        for m in CRATE_MARKERS:
+            if (repo_path / cp / m).exists():
+                marker = m
+                break
+        name = Path(cp).name
+        crates.append({"path": cp, "marker": marker, "name": name})
+
+    return crates

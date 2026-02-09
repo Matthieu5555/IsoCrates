@@ -73,4 +73,4 @@ curl http://localhost:8000/health
 
 ## License
 
-[Add license information]
+This project is licensed under the [MIT License](LICENSE).

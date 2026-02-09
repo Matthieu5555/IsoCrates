@@ -233,6 +233,17 @@ class IsoCratesClient:
         )
         return resp.json()
 
+    async def ask(
+        self,
+        question: str,
+        top_k: int = 5,
+    ) -> dict[str, Any]:
+        """Ask a question via RAG chat. Maps to POST /api/docs/ask/."""
+        resp = await self._request_with_retry(
+            "POST", "/api/docs/ask/", json={"question": question, "top_k": top_k},
+        )
+        return resp.json()
+
     async def close(self) -> None:
         """Close the underlying HTTP client."""
         if self._client and not self._client.is_closed:
