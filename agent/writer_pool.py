@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from typing import Any, Callable
 
 from openhands.sdk import LLM, Agent, Tool
@@ -21,6 +21,7 @@ from openhands.tools.task_tracker import TaskTrackerTool
 from openhands.tools.terminal import TerminalTool
 
 from model_config import ModelConfig
+from prompts import WRITER_CONVERSATION_TIMEOUT
 
 logger = logging.getLogger("isocrates.agent.writer_pool")
 
@@ -177,10 +178,20 @@ class WriterPool:
                     future = executor.submit(_run_one, doc_spec, idx, agent)
                     futures[future] = doc_spec["title"]
 
+                _pool_timeout = WRITER_CONVERSATION_TIMEOUT + 60
                 for future in as_completed(futures):
                     try:
-                        title, result = future.result()
+                        title, result = future.result(timeout=_pool_timeout)
                         _process_result(title, result)
+                    except FuturesTimeoutError:
+                        title = futures[future]
+                        logger.error(
+                            "Writer thread for %s exceeded pool timeout (%ds)",
+                            title, _pool_timeout,
+                        )
+                        _process_result(
+                            title, {"status": "error", "error": f"Pool-level timeout after {_pool_timeout}s"}
+                        )
                     except Exception as e:
                         title = futures[future]
                         logger.error(
@@ -206,10 +217,20 @@ class WriterPool:
                     future = executor.submit(_run_one, doc_spec, idx, agent)
                     futures[future] = doc_spec["title"]
 
+                _pool_timeout = WRITER_CONVERSATION_TIMEOUT + 60
                 for future in as_completed(futures):
                     try:
-                        title, result = future.result()
+                        title, result = future.result(timeout=_pool_timeout)
                         _process_result(title, result)
+                    except FuturesTimeoutError:
+                        title = futures[future]
+                        logger.error(
+                            "Writer thread for %s exceeded pool timeout (%ds)",
+                            title, _pool_timeout,
+                        )
+                        _process_result(
+                            title, {"status": "error", "error": f"Pool-level timeout after {_pool_timeout}s"}
+                        )
                     except Exception as e:
                         title = futures[future]
                         logger.error(

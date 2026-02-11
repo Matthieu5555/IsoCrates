@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import sys
 import argparse
@@ -49,6 +50,9 @@ from openhands.tools.terminal import TerminalTool
 # Static repo analysis
 from repo_analysis import ModuleInfo, RepoAnalysis, analyze_repository, detect_crates
 
+# Area-based partitioning for large repos
+from partitioner import DocumentationArea, partition_for_documentation
+
 # Document lifecycle (discovery, snapshot, cleanup)
 from document_lifecycle import DocumentLifecycle, get_current_commit_sha
 
@@ -63,9 +67,11 @@ from prompts import (
     COMPLEXITY_ORDER,
     DOCUMENT_TYPES,
     EXISTING_SUMMARY_TRUNCATION,
+    MERMAID_FIX_PROMPT,
     PLANNER_OUTPUT_CAP,
     SCOUT_CONDENSER_DIVISOR,
     WRITER_CONDENSER_DIVISOR,
+    WRITER_CONVERSATION_TIMEOUT,
     PROSE_REQUIREMENTS,
     TABLE_REQUIREMENTS,
     DIAGRAM_REQUIREMENTS,
@@ -97,13 +103,41 @@ from security import RepositoryValidator, PathValidator
 from model_config import ModelConfigError, resolve_model_config
 
 # Extracted concerns
+from mermaid_validator import validate_mermaid_blocks, format_errors_for_prompt
 from provenance import ProvenanceTracker
 from scout_pool import ScoutPool
 from writer_pool import WriterPool
+from circuit_breaker import run_with_timeout, CircuitBreakerOpen
 
 # Prevent interactive pagers from trapping agents in git commands
 os.environ.setdefault("GIT_PAGER", "cat")
 os.environ.setdefault("PAGER", "cat")
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown — checked between pipeline phases
+# ---------------------------------------------------------------------------
+
+_shutdown_requested = False
+
+
+def _handle_shutdown_signal(signum: int, frame: Any) -> None:
+    """Signal handler for graceful shutdown (SIGTERM / SIGINT)."""
+    global _shutdown_requested
+    sig_name = signal.Signals(signum).name
+    logger.warning("Received %s — requesting graceful shutdown", sig_name)
+    print(f"\n[Shutdown] Received {sig_name} — stopping after current phase completes...")
+    _shutdown_requested = True
+
+
+def _check_shutdown(phase: str) -> bool:
+    """Return True and log if shutdown was requested before *phase*."""
+    if _shutdown_requested:
+        logger.warning("Shutdown requested before %s phase — exiting gracefully", phase)
+        print(f"[Shutdown] Stopping before {phase} phase — partial results may be available")
+        return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Model Configuration
@@ -446,7 +480,6 @@ class OpenHandsDocGenerator:
         title = doc_spec["title"]
         sections = doc_spec.get("sections", [])
         key_files = doc_spec.get("key_files_to_read", [])
-        wikilinks_out = doc_spec.get("wikilinks_out", [])
 
         # Build full wiki page list for wikilink context
         all_page_titles = [d["title"] for d in blueprint["documents"]]
@@ -756,7 +789,11 @@ OUTPUT:
                 max_iteration_per_run=writer_max_iters,
             )
             conversation.send_message(brief)
-            conversation.run()
+            run_with_timeout(
+                conversation.run,
+                timeout=WRITER_CONVERSATION_TIMEOUT,
+                label=f"writer:{title}",
+            )
 
             # Find output in the writer's isolated temp directory
             writer_tmp_base = self.repo_path / "notes" / writer_tmp_dir
@@ -807,6 +844,62 @@ OUTPUT:
             clean_content = re.sub(
                 r"\n---\n\n\*Documentation.*$", "", body, flags=re.DOTALL
             )
+
+            # Validate mermaid diagrams and retry once if any have syntax errors.
+            # The writer conversation is still alive — we can send a follow-up
+            # message with the parse errors and let it fix the broken blocks.
+            mermaid_errors = validate_mermaid_blocks(clean_content)
+            if mermaid_errors:
+                error_details = format_errors_for_prompt(mermaid_errors)
+                print(f"   [Mermaid] {len(mermaid_errors)} diagram(s) have syntax errors, sending fix prompt...")
+                for err in mermaid_errors:
+                    print(f"      Block {err.block_index + 1} (line {err.line_number}): {err.error[:120]}")
+
+                # Save pre-fix content in case the fix times out and leaves
+                # a partial/corrupt file on disk.
+                pre_fix_content = clean_content
+                pre_fix_description = writer_description
+
+                fix_prompt = MERMAID_FIX_PROMPT.format(
+                    count=len(mermaid_errors),
+                    error_details=error_details,
+                    output_path=output_file,
+                )
+                conversation.send_message(fix_prompt)
+                mermaid_fix_timed_out = False
+                try:
+                    run_with_timeout(
+                        conversation.run,
+                        timeout=120,  # mermaid fix should be quick
+                        label=f"writer-mermaid-fix:{title}",
+                    )
+                except (TimeoutError, CircuitBreakerOpen) as e:
+                    logger.warning("Mermaid fix timed out for %s: %s — using original content", title, e)
+                    mermaid_fix_timed_out = True
+
+                if mermaid_fix_timed_out:
+                    # Keep the original content — the file on disk may be
+                    # partially written by the timed-out agent.
+                    clean_content = pre_fix_content
+                    writer_description = pre_fix_description
+                elif output_file.exists():
+                    # Re-read the corrected file
+                    raw_content = output_file.read_text()
+                    metadata_retry, body_retry = parse_bottomatter(raw_content)
+                    if not metadata_retry:
+                        metadata_retry, body_retry = parse_frontmatter(raw_content)
+                    if metadata_retry and metadata_retry.get("description"):
+                        writer_description = metadata_retry["description"]
+                    body = re.sub(r"^\*Documentation Written by.*?\*\n+", "", body_retry)
+                    clean_content = re.sub(
+                        r"\n---\n\n\*Documentation.*$", "", body, flags=re.DOTALL,
+                    )
+                    # Check if retry fixed the errors
+                    remaining = validate_mermaid_blocks(clean_content)
+                    if remaining:
+                        print(f"   [Mermaid] {len(remaining)} diagram(s) still broken after retry — continuing anyway")
+                    else:
+                        print(f"   [Mermaid] All diagrams fixed after retry")
 
             # Sanitize wikilinks: keep valid, convert files to GitHub, strip rest.
             # NOTE: This first pass uses planned titles so writers referencing
@@ -943,139 +1036,56 @@ OUTPUT:
             max_workers=max_workers,
         )
 
-    def generate_all(self, force: bool = False) -> dict:
+    # ------------------------------------------------------------------
+    # Static analysis (for partitioning decisions)
+    # ------------------------------------------------------------------
+
+    def _analyze_repo(self) -> RepoAnalysis:
+        """Run static analysis on the repository.  Pure filesystem, no LLM."""
+        return analyze_repository(self.repo_path, self.crate)
+
+    # ------------------------------------------------------------------
+    # Post-generation cleanup (shared by single-area and partitioned paths)
+    # ------------------------------------------------------------------
+
+    def _post_generation_cleanup(
+        self,
+        results: dict[str, dict],
+        planned_titles: set[str],
+        generated_doc_ids: set[str],
+        failed_doc_ids: set[str],
+        id_stats: dict[str, int],
+        snapshot: dict,
+    ) -> None:
+        """Wikilink re-sanitization, dangling report, summary, orphan cleanup.
+
+        Extracted so both ``_generate_single_area`` and ``_generate_partitioned``
+        share the same post-generation logic.
         """
-        Full pipeline: Scouts explore → Planner thinks → Writers execute.
-        """
-        results = {}
-
-        print("\n" + "=" * 70)
-        print("[Pipeline] THREE-TIER DOCUMENTATION GENERATION")
-        print("=" * 70)
-
-        # Pre-generation snapshot for orphan cleanup
-        snapshot = self._snapshot_existing_docs()
-
-        # Phase 0: Check if this is a regeneration (docs already exist)
-        regen_ctx = self._get_regeneration_context()
-
-        if regen_ctx:
-            # Check if repo has actually changed
-            if not regen_ctx["git_diff"].strip() and not regen_ctx["git_log"].strip():
-                # Repo hasn't moved — check if any doc is actually stale
-                current_sha = self._get_current_commit_sha()
-                if regen_ctx["last_commit_sha"] == current_sha and not force:
-                    print("\n[Pipeline] Repository unchanged since last generation — nothing to do.")
-                    return results
-
-            # REGENERATION PATH: docs exist, focus on what changed
-            print("\n[Phase 1] DIFF SCOUT — Analyzing changes since last generation...")
-            scout_reports = self._run_diff_scout(regen_ctx)
-
-            # Append existing doc content summaries for planner context
-            existing_summary = "\n\n---\n\n## Existing Documentation Content\n"
-            for doc in regen_ctx["existing_docs"]:
-                existing_summary += f"\n### {doc['title']} ({doc['doc_type']})\n"
-                existing_summary += doc["content"][:EXISTING_SUMMARY_TRUNCATION]
-                if len(doc["content"]) > EXISTING_SUMMARY_TRUNCATION:
-                    existing_summary += "\n... [truncated]"
-                existing_summary += "\n"
-            scout_reports += existing_summary
-        else:
-            # FIRST-TIME PATH: full exploration
-            print("\n[Phase 1] SCOUTS — Exploring repository...")
-            scout_reports = self._run_scouts()
-
-        # Phase 2: Planner designs documentation architecture
-        print("\n[Phase 2] PLANNER — Designing documentation architecture...")
-        planner_existing = regen_ctx["existing_docs"] if regen_ctx else None
-        blueprint = self._planner_think(scout_reports, existing_docs=planner_existing)
-
-        documents = blueprint.get("documents", [])
-
-        # Build title → doc_id map from snapshot for title-based ID resolution
-        title_to_doc_id: dict[str, str] = {}
-        if snapshot["by_id"]:
-            for doc_id, doc_info in snapshot["by_id"].items():
-                doc_title = doc_info.get("title", "")
-                if doc_title:
-                    if doc_title in title_to_doc_id:
-                        print(f"[Warning] Title collision: \"{doc_title}\" — keeping first match")
-                    else:
-                        title_to_doc_id[doc_title] = doc_id
-            if title_to_doc_id:
-                print(f"[ID Resolution] Built title→ID map with {len(title_to_doc_id)} entries")
-
-        total = len(documents)
-
-        # Discover existing docs (once, shared across all writers)
-        discovery = self._discover_existing_documents()
-        print(f"   Existing documents in system: {discovery['count']}")
-
-        # Use compressed scout reports for writers (planner already got full reports)
-        writer_scout_reports = getattr(self, '_compressed_scout_reports', scout_reports)
-
-        # Phase 3: Writers execute (parallel or sequential based on WRITER_PARALLEL)
-        max_workers = int(os.getenv("WRITER_PARALLEL", "3"))
-        print(f"\n[Phase 3] WRITERS — Generating {total} documents "
-              f"(max {max_workers} parallel, detail first, hub last)...")
-
-        if max_workers > 1:
-            results, generated_doc_ids, failed_doc_ids, id_stats = self._run_writers_parallel(
-                documents=documents,
-                blueprint=blueprint,
-                discovery=discovery,
-                scout_reports=writer_scout_reports,
-                title_to_doc_id=title_to_doc_id if title_to_doc_id else None,
-                snapshot_by_id=snapshot["by_id"] if snapshot["by_id"] else None,
-                max_workers=max_workers,
-            )
-        else:
-            # Sequential fallback (WRITER_PARALLEL=1)
-            generated_doc_ids = set()
-            failed_doc_ids = set()
-            id_stats = {"reused": 0, "new": 0, "renamed": 0}
-
-            # Reorder: detail first, hub last
-            _HUB_TYPES = {"overview", "capabilities", "quickstart"}
-            detail_docs = [d for d in documents if d.get("doc_type") not in _HUB_TYPES]
-            hub_docs = [d for d in documents if d.get("doc_type") in _HUB_TYPES]
-            documents = detail_docs + hub_docs
-
-            for idx, doc_spec in enumerate(documents, 1):
-                print(f"\n[{idx}/{total}] Dispatching writer for: {doc_spec['title']}")
-                result = self.generate_document(
-                    doc_spec, blueprint, discovery, writer_scout_reports,
-                    title_to_doc_id=title_to_doc_id if title_to_doc_id else None,
-                    snapshot_by_id=snapshot["by_id"] if snapshot["by_id"] else None,
-                )
-                results[doc_spec["title"]] = result
-
-                doc_id = result.get("doc_id")
-                if doc_id:
-                    status = result.get("status", "")
-                    if status in ("success", "skipped"):
-                        generated_doc_ids.add(doc_id)
-                    elif status in ("error", "error_fallback", "warning"):
-                        failed_doc_ids.add(doc_id)
-
-                resolved = result.get("resolved_from", "")
-                if "replaces:" in resolved:
-                    id_stats["renamed"] += 1
-                elif "title match:" in resolved:
-                    id_stats["reused"] += 1
-                else:
-                    id_stats["new"] += 1
-
-        # Post-generation wikilink re-sanitization:
-        # Rebuild valid_titles from *actually generated* titles (not planned).
-        # This strips [[links]] to pages whose writers failed/timed out.
+        # Wikilink re-sanitization
         actually_generated_titles = {
             title for title, result in results.items()
             if result.get("status") in ("success", "skipped")
         }
-        planned_titles = {d["title"] for d in documents}
         dangling_titles = planned_titles - actually_generated_titles
+
+        # Pre-fetch documents from API once — both the re-sanitization and
+        # dangling-wikilink loops need the same content.
+        doc_cache: dict[str, dict] = {}
+        for title, result in results.items():
+            if result.get("status") != "success":
+                continue
+            doc_id = result.get("doc_id")
+            api_result = result.get("api_result", {})
+            if not doc_id or api_result.get("method") == "filesystem":
+                continue
+            try:
+                doc = self.api_client.get_document(doc_id)
+                if doc:
+                    doc_cache[doc_id] = doc
+            except Exception as e:
+                logger.warning("Failed to fetch doc %s for cleanup: %s", doc_id, e)
+
         if dangling_titles:
             print(f"\n[Wikilink Cleanup] {len(dangling_titles)} planned page(s) were never generated:")
             for dt in sorted(dangling_titles):
@@ -1087,30 +1097,25 @@ OUTPUT:
                 if result.get("status") != "success":
                     continue
                 doc_id = result.get("doc_id")
-                api_result = result.get("api_result", {})
-                if not doc_id or api_result.get("method") == "filesystem":
+                if not doc_id or doc_id not in doc_cache:
                     continue
-
-                # Fetch the document content from the API
-                try:
-                    doc = self.api_client.get_document(doc_id)
-                    if not doc:
-                        continue
-                    content = doc.get("content", "")
-                    # Check if content has any dangling wikilinks
-                    has_dangling = any(
-                        f"[[{dt}]]" in content or f"[[{dt}|" in content
-                        for dt in dangling_titles
-                    )
-                    if not has_dangling:
-                        continue
-                    # Re-sanitize with actually generated titles only
-                    clean = self._sanitize_wikilinks(content, actually_generated_titles, self.repo_url)
-                    if clean != content:
+                doc = doc_cache[doc_id]
+                content = doc.get("content", "")
+                has_dangling = any(
+                    f"[[{dt}]]" in content or f"[[{dt}|" in content
+                    for dt in dangling_titles
+                )
+                if not has_dangling:
+                    continue
+                clean = self._sanitize_wikilinks(content, actually_generated_titles, self.repo_url)
+                if clean != content:
+                    try:
                         self.api_client.update_document(doc_id, {"content": clean})
                         resanitized_count += 1
-                except Exception as e:
-                    logger.warning("Failed to re-sanitize doc %s: %s", doc_id, e)
+                        # Update cache so the dangling report sees sanitized content
+                        doc_cache[doc_id] = {**doc, "content": clean}
+                    except Exception as e:
+                        logger.warning("Failed to re-sanitize doc %s: %s", doc_id, e)
 
             if resanitized_count:
                 print(f"   Re-sanitized {resanitized_count} document(s)")
@@ -1122,20 +1127,14 @@ OUTPUT:
             if result.get("status") != "success":
                 continue
             doc_id = result.get("doc_id")
-            if not doc_id:
+            if not doc_id or doc_id not in doc_cache:
                 continue
-            try:
-                doc = self.api_client.get_document(doc_id)
-                if not doc:
-                    continue
-                content = doc.get("content", "")
-                for m in wikilink_pattern.finditer(content):
-                    inner = m.group(1)
-                    target = inner.split("|")[0].strip() if "|" in inner else inner.strip()
-                    if target not in actually_generated_titles:
-                        dangling_report.setdefault(title, []).append(target)
-            except Exception:
-                pass
+            content = doc_cache[doc_id].get("content", "")
+            for m in wikilink_pattern.finditer(content):
+                inner = m.group(1)
+                target = inner.split("|")[0].strip() if "|" in inner else inner.strip()
+                if target not in actually_generated_titles:
+                    dangling_report.setdefault(title, []).append(target)
 
         if dangling_report:
             print(f"\n[Wikilink Report] Dangling wikilinks found in {len(dangling_report)} document(s):")
@@ -1144,6 +1143,7 @@ OUTPUT:
                 print(f"   {doc_title}: {', '.join(unique_targets)}")
 
         # Summary
+        total = len(results)
         print("\n" + "=" * 70)
         print("[Summary] GENERATION COMPLETE")
         print("=" * 70)
@@ -1166,7 +1166,7 @@ OUTPUT:
             id_info = f" [{resolved}]" if resolved else ""
             print(f"   {title}: {status} ({doc_id}){id_info}")
 
-        # Phase 4: Orphan cleanup
+        # Orphan cleanup
         if snapshot["count"] > 0:
             print("\n[Phase 4] CLEANUP — Removing orphaned documents...")
             cleanup = self._cleanup_orphaned_docs(snapshot, generated_doc_ids, failed_doc_ids)
@@ -1175,7 +1175,343 @@ OUTPUT:
                       f"Preserved (user-organized): {cleanup.get('preserved_user_organized', 0)}  "
                       f"Preserved (failed): {cleanup['preserved_failed']}")
 
+    # ------------------------------------------------------------------
+    # Writer dispatch (shared helper for running writers + collecting stats)
+    # ------------------------------------------------------------------
+
+    def _run_writers(
+        self,
+        documents: list[dict],
+        blueprint: dict,
+        discovery: dict,
+        scout_reports: str,
+        title_to_doc_id: dict[str, str] | None,
+        snapshot_by_id: dict | None,
+    ) -> tuple[dict[str, dict], set[str], set[str], dict[str, int]]:
+        """Dispatch writers (parallel or sequential) and collect results.
+
+        Returns ``(results, generated_ids, failed_ids, id_stats)``.
+        """
+        max_workers = int(os.getenv("WRITER_PARALLEL", "3"))
+        total = len(documents)
+        print(f"\n[Writers] Generating {total} documents "
+              f"(max {max_workers} parallel, detail first, hub last)...")
+
+        if max_workers > 1:
+            return self._run_writers_parallel(
+                documents=documents,
+                blueprint=blueprint,
+                discovery=discovery,
+                scout_reports=scout_reports,
+                title_to_doc_id=title_to_doc_id,
+                snapshot_by_id=snapshot_by_id,
+                max_workers=max_workers,
+            )
+
+        # Sequential fallback (WRITER_PARALLEL=1)
+        results: dict[str, dict] = {}
+        generated_ids: set[str] = set()
+        failed_ids: set[str] = set()
+        id_stats: dict[str, int] = {"reused": 0, "new": 0, "renamed": 0}
+
+        _HUB_TYPES = {"overview", "capabilities", "quickstart"}
+        detail_docs = [d for d in documents if d.get("doc_type") not in _HUB_TYPES]
+        hub_docs = [d for d in documents if d.get("doc_type") in _HUB_TYPES]
+        ordered = detail_docs + hub_docs
+
+        for idx, doc_spec in enumerate(ordered, 1):
+            print(f"\n[{idx}/{total}] Dispatching writer for: {doc_spec['title']}")
+            result = self.generate_document(
+                doc_spec, blueprint, discovery, scout_reports,
+                title_to_doc_id=title_to_doc_id,
+                snapshot_by_id=snapshot_by_id,
+            )
+            results[doc_spec["title"]] = result
+
+            doc_id = result.get("doc_id")
+            if doc_id:
+                status = result.get("status", "")
+                if status in ("success", "skipped"):
+                    generated_ids.add(doc_id)
+                elif status in ("error", "error_fallback", "warning"):
+                    failed_ids.add(doc_id)
+
+            resolved = result.get("resolved_from", "")
+            if "replaces:" in resolved:
+                id_stats["renamed"] += 1
+            elif "title match:" in resolved:
+                id_stats["reused"] += 1
+            else:
+                id_stats["new"] += 1
+
+        return results, generated_ids, failed_ids, id_stats
+
+    # ------------------------------------------------------------------
+    # generate_all: dispatcher
+    # ------------------------------------------------------------------
+
+    def generate_all(self, force: bool = False) -> dict:
+        """Full pipeline: Scouts explore → Planner thinks → Writers execute.
+
+        Automatically partitions large repositories into documentation areas
+        when the codebase exceeds the planner's context window and has enough
+        module structure to split meaningfully.  Small repos go through the
+        original single-area pipeline unchanged.
+        """
+        print("\n" + "=" * 70)
+        print("[Pipeline] THREE-TIER DOCUMENTATION GENERATION")
+        print("=" * 70)
+
+        snapshot = self._snapshot_existing_docs()
+        regen_ctx = self._get_regeneration_context()
+
+        # Regeneration always uses single-area path (targeted updates)
+        if regen_ctx:
+            return self._generate_single_area(
+                force=force, regen_ctx=regen_ctx, snapshot=snapshot,
+            )
+
+        # First-time generation: check if partitioning is warranted
+        analysis = self._analyze_repo()
+        areas = partition_for_documentation(
+            analysis, context_budget=self._planner_config.context_window,
+        )
+
+        if len(areas) == 1:
+            return self._generate_single_area(
+                force=force, regen_ctx=None, snapshot=snapshot,
+            )
+
+        print(f"\n[Partitioner] Repository split into {len(areas)} documentation areas:")
+        for area in areas:
+            mods = ", ".join(area.module_names[:5])
+            suffix = f"... +{len(area.module_names) - 5}" if len(area.module_names) > 5 else ""
+            print(f"   {area.name}: {len(area.module_names)} modules, "
+                  f"~{area.token_estimate:,} tokens ({mods}{suffix})")
+
+        return self._generate_partitioned(
+            areas=areas, snapshot=snapshot, force=force,
+        )
+
+    # ------------------------------------------------------------------
+    # Single-area pipeline (original flow, extracted verbatim)
+    # ------------------------------------------------------------------
+
+    def _generate_single_area(
+        self,
+        force: bool,
+        regen_ctx: dict | None,
+        snapshot: dict,
+    ) -> dict:
+        """Execute the full pipeline for a single (un-partitioned) repository.
+
+        This is the original ``generate_all()`` body, extracted so the
+        dispatcher can route to it.  Behavior is identical to the
+        pre-partitioning code.
+        """
+        results: dict[str, dict] = {}
+
+        if regen_ctx:
+            # Check if repo has actually changed
+            if not regen_ctx["git_diff"].strip() and not regen_ctx["git_log"].strip():
+                current_sha = self._get_current_commit_sha()
+                if regen_ctx["last_commit_sha"] == current_sha and not force:
+                    print("\n[Pipeline] Repository unchanged since last generation — nothing to do.")
+                    return results
+
+            print("\n[Phase 1] DIFF SCOUT — Analyzing changes since last generation...")
+            scout_reports = self._run_diff_scout(regen_ctx)
+
+            existing_summary = "\n\n---\n\n## Existing Documentation Content\n"
+            for doc in regen_ctx["existing_docs"]:
+                existing_summary += f"\n### {doc['title']} ({doc['doc_type']})\n"
+                existing_summary += doc["content"][:EXISTING_SUMMARY_TRUNCATION]
+                if len(doc["content"]) > EXISTING_SUMMARY_TRUNCATION:
+                    existing_summary += "\n... [truncated]"
+                existing_summary += "\n"
+            scout_reports += existing_summary
+        else:
+            print("\n[Phase 1] SCOUTS — Exploring repository...")
+            scout_reports = self._run_scouts()
+
+        if _check_shutdown("planner"):
+            return results
+
+        print("\n[Phase 2] PLANNER — Designing documentation architecture...")
+        planner_existing = regen_ctx["existing_docs"] if regen_ctx else None
+        blueprint = self._planner_think(scout_reports, existing_docs=planner_existing)
+
+        documents = blueprint.get("documents", [])
+
+        # Build title → doc_id map from snapshot
+        title_to_doc_id: dict[str, str] = {}
+        if snapshot["by_id"]:
+            for doc_id, doc_info in snapshot["by_id"].items():
+                doc_title = doc_info.get("title", "")
+                if doc_title:
+                    if doc_title in title_to_doc_id:
+                        print(f"[Warning] Title collision: \"{doc_title}\" — keeping first match")
+                    else:
+                        title_to_doc_id[doc_title] = doc_id
+            if title_to_doc_id:
+                print(f"[ID Resolution] Built title→ID map with {len(title_to_doc_id)} entries")
+
+        discovery = self._discover_existing_documents()
+        print(f"   Existing documents in system: {discovery['count']}")
+
+        if _check_shutdown("writers"):
+            return results
+
+        writer_scout_reports = getattr(self, '_compressed_scout_reports', scout_reports)
+
+        print(f"\n[Phase 3] WRITERS — Generating {len(documents)} documents...")
+        results, generated_doc_ids, failed_doc_ids, id_stats = self._run_writers(
+            documents=documents,
+            blueprint=blueprint,
+            discovery=discovery,
+            scout_reports=writer_scout_reports,
+            title_to_doc_id=title_to_doc_id or None,
+            snapshot_by_id=snapshot["by_id"] or None,
+        )
+
+        planned_titles = {d["title"] for d in documents}
+        self._post_generation_cleanup(
+            results, planned_titles, generated_doc_ids, failed_doc_ids,
+            id_stats, snapshot,
+        )
         return results
+
+    # ------------------------------------------------------------------
+    # Partitioned pipeline (area-based generation + integration pass)
+    # ------------------------------------------------------------------
+
+    def _generate_partitioned(
+        self,
+        areas: list[DocumentationArea],
+        snapshot: dict,
+        force: bool = False,
+    ) -> dict:
+        """Execute the pipeline with area-based partitioning.
+
+        Each area gets its own scout → planner → writer pipeline with
+        focused, uncompressed reports.  After all areas complete, an
+        integration pass generates cross-cutting hub pages (Overview,
+        Getting Started, Architecture) that wikilink into area pages.
+        """
+        all_results: dict[str, dict] = {}
+        all_generated_ids: set[str] = set()
+        all_failed_ids: set[str] = set()
+        all_id_stats: dict[str, int] = {"reused": 0, "new": 0, "renamed": 0}
+        area_summaries: list[dict[str, Any]] = []
+        all_planned_titles: set[str] = set()
+
+        # Build title → doc_id map from snapshot
+        title_to_doc_id: dict[str, str] = {}
+        if snapshot["by_id"]:
+            for doc_id, doc_info in snapshot["by_id"].items():
+                doc_title = doc_info.get("title", "")
+                if doc_title and doc_title not in title_to_doc_id:
+                    title_to_doc_id[doc_title] = doc_id
+
+        discovery = self._discover_existing_documents()
+        print(f"   Existing documents in system: {discovery['count']}")
+
+        # === Process each content area ===
+        for area_idx, area in enumerate(areas, 1):
+            print(f"\n{'='*70}")
+            print(f"[Area {area_idx}/{len(areas)}] {area.name}")
+            print(f"{'='*70}")
+
+            # Phase 1: Area-scoped scouts
+            print(f"\n[Phase 1] Scouting area: {area.name}...")
+            scout_result = self.scout_runner.run_area(area)
+            self._apply_scout_result(scout_result)
+
+            # Phase 2: Area-scoped planner (uncompressed reports — the key
+            # quality improvement over the single-area path for large repos)
+            print(f"\n[Phase 2] Planning area: {area.name}...")
+            area_reports = scout_result.combined_text
+            blueprint = self.planner.plan(area_reports)
+
+            documents = blueprint.get("documents", [])
+            area_doc_titles = [d["title"] for d in documents]
+            all_planned_titles.update(area_doc_titles)
+
+            area_summaries.append({
+                "name": area.name,
+                "summary": blueprint.get("repo_summary", f"Area covering {area.name}"),
+                "modules": list(area.module_names),
+                "doc_titles": area_doc_titles,
+            })
+
+            # Phase 3: Writers for this area
+            writer_reports = scout_result.compressed_text
+            print(f"\n[Phase 3] Writing {len(documents)} documents for {area.name}...")
+
+            area_results, gen_ids, fail_ids, stats = self._run_writers(
+                documents=documents,
+                blueprint=blueprint,
+                discovery=discovery,
+                scout_reports=writer_reports,
+                title_to_doc_id=title_to_doc_id or None,
+                snapshot_by_id=snapshot["by_id"] or None,
+            )
+
+            all_results.update(area_results)
+            all_generated_ids.update(gen_ids)
+            all_failed_ids.update(fail_ids)
+            for k in all_id_stats:
+                all_id_stats[k] += stats.get(k, 0)
+
+        # === Integration pass: cross-cutting hub pages ===
+        print(f"\n{'='*70}")
+        print("[Integration] Cross-cutting documentation")
+        print(f"{'='*70}")
+
+        # Collect all titles generated so far (for the integration planner
+        # to reference in wikilinks)
+        all_generated_titles = [
+            title for title, result in all_results.items()
+            if result.get("status") in ("success", "skipped")
+        ]
+
+        integration_blueprint = self.planner.plan_integration(
+            area_summaries=area_summaries,
+            all_titles=all_generated_titles,
+        )
+
+        integration_docs = integration_blueprint.get("documents", [])
+        all_planned_titles.update(d["title"] for d in integration_docs)
+
+        # Build lightweight scout context for integration writers (area
+        # summaries, not deep module reports)
+        integration_scout_text = "## Repository Areas\n\n"
+        for area_sum in area_summaries:
+            integration_scout_text += f"### {area_sum['name']}\n{area_sum['summary']}\n\n"
+            integration_scout_text += f"Pages: {', '.join(area_sum['doc_titles'])}\n\n"
+
+        print(f"\n[Phase 3] Writing {len(integration_docs)} integration documents...")
+        int_results, int_gen, int_fail, int_stats = self._run_writers(
+            documents=integration_docs,
+            blueprint=integration_blueprint,
+            discovery=discovery,
+            scout_reports=integration_scout_text,
+            title_to_doc_id=title_to_doc_id or None,
+            snapshot_by_id=snapshot["by_id"] or None,
+        )
+
+        all_results.update(int_results)
+        all_generated_ids.update(int_gen)
+        all_failed_ids.update(int_fail)
+        for k in all_id_stats:
+            all_id_stats[k] += int_stats.get(k, 0)
+
+        # === Post-generation cleanup ===
+        self._post_generation_cleanup(
+            all_results, all_planned_titles, all_generated_ids, all_failed_ids,
+            all_id_stats, snapshot,
+        )
+        return all_results
 
 
 # ===================================================================
@@ -1246,6 +1582,10 @@ Examples:
         help="Automatically detect and process independent sub-projects (crates)",
     )
     args = parser.parse_args()
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
 
     # Override config if specified via CLI
     if args.planner_model:

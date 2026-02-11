@@ -66,6 +66,16 @@ FILE_HASH_LENGTH: int = 16
 # to decide which sections need updating.
 EXISTING_SUMMARY_TRUNCATION: int = 3000
 
+# Wall-clock timeout (seconds) for a single writer conversation.
+# The LLM timeout is 900s per request, but a conversation may make many
+# requests — this caps total elapsed time.  100 iterations ≈ 15 min at
+# typical LLM latency; 600s is a safe ceiling.
+WRITER_CONVERSATION_TIMEOUT: int = 600
+
+# Wall-clock timeout (seconds) for a single scout conversation.
+# Scouts are simpler than writers and should complete faster.
+SCOUT_CONVERSATION_TIMEOUT: int = 300
+
 
 # ---------------------------------------------------------------------------
 # Shared Prompt Components
@@ -131,6 +141,17 @@ Use ```mermaid code blocks. Choose the right type:
 Include a brief caption sentence. Not every page needs a diagram — use
 them on architecture, flow, and data model pages where they genuinely
 clarify relationships.
+"""
+
+MERMAID_FIX_PROMPT: str = """Your document has {count} mermaid diagram(s) with syntax errors that will
+not render on the frontend. Fix ONLY the broken diagrams listed below —
+do not change any other content in the document.
+
+{error_details}
+
+Overwrite the file at this EXACT path: {output_path}
+Use file_editor command=create to write the COMPLETE corrected page.
+Keep all text, tables, wikilinks, and working diagrams exactly as they are.
 """
 
 WIKILINK_REQUIREMENTS: str = """

@@ -10,6 +10,7 @@ The rate limiter is a pure function ``check_rate_limit`` that can be tested inde
 """
 
 import logging
+import threading
 import time
 import uuid
 from typing import Optional
@@ -30,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 # Bucket state: {client_key: (available_tokens, last_refill_timestamp)}
 _rate_buckets: dict[str, tuple[float, float]] = {}
+_rate_lock = threading.Lock()
+
+# Periodic eviction to prevent unbounded memory growth from rotating IPs.
+_rate_call_count = 0
+_EVICT_EVERY = 100       # sweep every N calls
+_EVICT_AGE = 120.0       # remove entries older than 2 minutes
 
 
 def check_rate_limit(
@@ -50,11 +57,21 @@ def check_rate_limit(
         ``(allowed, retry_after)`` — *retry_after* is 0.0 when allowed, otherwise
         the number of seconds until the next token becomes available.
     """
+    global _rate_call_count
+
     if max_per_minute <= 0:
         return True, 0.0
 
     if now is None:
         now = time.monotonic()
+
+    # Periodic eviction of stale entries to bound memory usage.
+    _rate_call_count += 1
+    if _rate_call_count % _EVICT_EVERY == 0:
+        cutoff = now - _EVICT_AGE
+        stale = [k for k, (_, ts) in bucket.items() if ts < cutoff]
+        for k in stale:
+            del bucket[k]
 
     refill_rate = max_per_minute / 60.0  # tokens per second
 
@@ -80,7 +97,7 @@ def check_rate_limit(
 # ---------------------------------------------------------------------------
 
 # Paths that bypass rate limiting (health probes should never be throttled).
-_EXEMPT_PATHS = frozenset({"/", "/health", "/docs", "/redoc", "/openapi.json"})
+_EXEMPT_PATHS = frozenset({"/", "/health", "/health/deep", "/docs", "/redoc", "/openapi.json"})
 
 
 def _client_key(request: Request) -> str:
@@ -108,9 +125,10 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         # --- Rate limiting ---
         if request.url.path not in _EXEMPT_PATHS:
             key = _client_key(request)
-            allowed, retry_after = check_rate_limit(
-                _rate_buckets, key, settings.rate_limit_per_minute
-            )
+            with _rate_lock:
+                allowed, retry_after = check_rate_limit(
+                    _rate_buckets, key, settings.rate_limit_per_minute
+                )
             if not allowed:
                 logger.warning(
                     "Rate limit exceeded",

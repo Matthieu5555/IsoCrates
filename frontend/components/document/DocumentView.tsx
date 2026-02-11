@@ -218,7 +218,7 @@ export function DocumentView({ document: initialDocument }: DocumentViewProps) {
         onClose={() => setDeleteConfirmOpen(false)}
         onConfirm={handleDeleteConfirm}
         title="Delete Document"
-        message={`Are you sure you want to delete "${document.repo_name}"? It will be moved to trash.`}
+        message={`Are you sure you want to delete "${document.title}"? It will be moved to trash.`}
         confirmText="Delete"
         variant="danger"
       />

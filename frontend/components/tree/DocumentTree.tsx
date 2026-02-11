@@ -134,7 +134,8 @@ export function DocumentTree() {
     try {
       if (selectedNode.type === 'document') {
         await deleteDocument(selectedNode.id);
-        // Optimistic removal: update local tree immediately instead of full refetch
+        // Server-first removal: update local tree after successful API delete
+        // instead of full refetch for responsiveness.
         removeNode(selectedNode.id);
         useUIStore.getState().setTrashCount(useUIStore.getState().trashCount + 1);
         toast.success('Moved to trash', 'Document can be restored from the Trash');

@@ -392,9 +392,10 @@ class DependencyService:
 
     def _has_path(self, start: str, target: str, visited: Set[str]) -> bool:
         """
-        DFS to check if there's a path from start to target.
+        Iterative DFS to check if there's a path from start to target.
 
-        Internal helper for cycle detection.
+        Uses an explicit stack instead of recursion to avoid
+        ``RecursionError`` on deep dependency chains.
 
         Args:
             start: Starting document ID
@@ -404,18 +405,14 @@ class DependencyService:
         Returns:
             True if path exists from start to target
         """
-        if start == target:
-            return True
-
-        if start in visited:
-            return False
-
-        visited.add(start)
-
-        # Get all outgoing dependencies from current node
-        outgoing = self.dep_repo.get_by_source(start)
-        for dep in outgoing:
-            if self._has_path(dep.to_doc_id, target, visited):
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            if node == target:
                 return True
-
+            if node in visited:
+                continue
+            visited.add(node)
+            for dep in self.dep_repo.get_by_source(node):
+                stack.append(dep.to_doc_id)
         return False

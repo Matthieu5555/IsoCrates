@@ -1,3 +1,6 @@
+# Transient scripts
+.mermaid_validate.mjs
+
 # Python
 __pycache__/
 *.py[cod]

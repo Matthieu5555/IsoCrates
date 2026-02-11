@@ -53,7 +53,8 @@ class ChatService:
     @staticmethod
     def is_configured() -> bool:
         """Check if chat is configured (needs a model and API key)."""
-        return bool(settings.chat_model and settings.embedding_api_key)
+        api_key = settings.chat_api_key or settings.embedding_api_key
+        return bool(settings.chat_model and api_key)
 
     def ask(
         self,
@@ -73,7 +74,7 @@ class ChatService:
         """
         if not self.is_configured():
             return {
-                "answer": "Chat is not configured. Set CHAT_MODEL and EMBEDDING_API_KEY.",
+                "answer": "Chat is not configured. Set CHAT_MODEL and either CHAT_API_KEY or EMBEDDING_API_KEY.",
                 "sources": [],
                 "model": "",
             }
@@ -125,6 +126,7 @@ class ChatService:
                         if doc:
                             _add_doc(doc)
             except Exception:
+                logger.warning("FTS search failed for term %r", term, exc_info=True)
                 continue
 
         # Limit to top_k total
@@ -148,8 +150,6 @@ class ChatService:
         context_text = "\n".join(context_parts)
 
         # --- LLM call ---
-        import litellm
-
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -162,18 +162,25 @@ class ChatService:
         ]
 
         try:
-            response = litellm.completion(
-                model=settings.chat_model,
-                api_key=settings.embedding_api_key,
-                messages=messages,
-                max_tokens=1024,
-                temperature=0.3,
-            )
+            import litellm
+
+            chat_kwargs: dict = {
+                "model": settings.chat_model,
+                "api_key": settings.chat_api_key or settings.embedding_api_key,
+                "messages": messages,
+                "max_tokens": 1024,
+                "temperature": 0.3,
+                "timeout": 30,
+            }
+            if settings.chat_api_base:
+                chat_kwargs["api_base"] = settings.chat_api_base
+
+            response = litellm.completion(**chat_kwargs)
             answer = response.choices[0].message.content
         except Exception as e:
             logger.exception("Chat completion failed")
             return {
-                "answer": f"LLM call failed: {e}",
+                "answer": "Unable to generate an answer right now. Please try again later.",
                 "sources": [{"title": d["title"], "id": d["id"], "path": d["path"]} for d in context_docs],
                 "model": settings.chat_model,
             }

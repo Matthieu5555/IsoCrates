@@ -67,7 +67,7 @@ class IsoCratesClient:
                     request=resp.request,
                     response=resp,
                 )
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
                 last_exc = exc
 
             if attempt < MAX_RETRIES - 1:

@@ -15,7 +15,7 @@ from ..models import Document
 from ..schemas.document import DocumentCreate, DocumentUpdate, DocumentListResponse, DocumentKeywordsUpdate, SearchResultResponse, BatchResult, BatchError, BatchParams
 from ..repositories import DocumentRepository, VersionRepository
 from ..schemas.version import VersionCreate
-from ..exceptions import IsoException, DocumentNotFoundError, ConflictError, ValidationError
+from ..exceptions import IsoException, DocumentNotFoundError, ValidationError
 from ..services.dependency_service import DependencyService
 
 # Number of hex chars used from SHA-256 hash for document ID components.
@@ -135,16 +135,12 @@ class DocumentService:
     def update_document(self, doc_id: str, update_data: DocumentUpdate, commit: bool = True) -> Document:
         """Update document content, create new version, and refresh wikilink dependencies.
 
-        When update_data.version is provided, checks it matches the current
-        version in the database. Raises ConflictError (409) on mismatch,
-        indicating a concurrent modification.
+        When update_data.version is provided, the version check and write
+        happen atomically at the database level (WHERE version = expected).
+        Raises ConflictError (409) if another writer modified the document
+        between the client's read and this write.
         """
-        existing = self.doc_repo.get_by_id(doc_id)
-
-        if update_data.version is not None and update_data.version != existing.version:
-            raise ConflictError(doc_id)
-
-        updated = self.doc_repo.update(doc_id, update_data)
+        updated = self.doc_repo.update(doc_id, update_data, expected_version=update_data.version)
 
         version = VersionCreate(
             doc_id=doc_id,
@@ -280,6 +276,10 @@ class DocumentService:
         old_repo_name = doc.repo_name
         target_path = target_path.strip().strip('/')
         doc.path = target_path
+        # repo_name is a plain column (not derived), so update it to match
+        # the new path's top-level segment.
+        if target_path:
+            doc.repo_name = target_path.split('/')[0]
         self.db.flush()
         self.db.refresh(doc)
 
@@ -373,6 +373,8 @@ class DocumentService:
 
         return result
 
+    _KNOWN_BATCH_OPS = frozenset({"delete", "move", "add_keywords", "remove_keywords"})
+
     def execute_batch(self, operation: str, doc_ids: list[str], params: BatchParams) -> BatchResult:
         """Execute a batch operation on multiple documents.
 
@@ -380,6 +382,14 @@ class DocumentService:
         Empty doc_ids returns zero counts (not an error).
         Partial failures are reported in errors, not raised as exceptions.
         """
+        if operation not in self._KNOWN_BATCH_OPS:
+            return BatchResult(
+                total=len(doc_ids),
+                succeeded=0,
+                failed=len(doc_ids),
+                errors=[BatchError(doc_id="*", error=f"Unknown operation: {operation}")],
+            )
+
         total = len(doc_ids)
         succeeded = 0
         errors: list[BatchError] = []
@@ -403,8 +413,6 @@ class DocumentService:
                     doc = self.doc_repo.get_by_id(doc_id)
                     doc.keywords = [k for k in (doc.keywords or []) if k not in kw_to_remove]
                     succeeded += 1
-                else:
-                    errors.append(BatchError(doc_id=doc_id, error=f"Unknown operation: {operation}"))
                 savepoint.commit()
             except (IsoException, ValueError, sqlalchemy.exc.IntegrityError) as e:
                 savepoint.rollback()

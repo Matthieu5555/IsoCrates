@@ -197,7 +197,10 @@ async def lifespan(app: FastAPI):
 
     yield  # App runs here
 
-    # Shutdown: nothing to clean up currently
+    # --- Shutdown: drain connection pool ---
+    logger.info("Shutting down: disposing database engine")
+    engine.dispose()
+    logger.info("Shutdown complete")
 
 
 # Create FastAPI app
@@ -287,4 +290,65 @@ def health_check(db: Session = Depends(get_db)):
         "uptime_seconds": round(time.monotonic() - _startup_time),
         "version": "1.0.0",
         "document_count": document_count,
+    }
+
+
+@app.get("/health/deep")
+def deep_health_check(db: Session = Depends(get_db)):
+    """Deep health check — verifies database and external service connectivity.
+
+    More expensive than /health. Use for deployment verification, not
+    load balancer probes (which should use /health).
+    """
+    components: dict = {}
+
+    # 1. Database
+    try:
+        db.execute(text("SELECT 1"))
+        components["database"] = {"status": "ok"}
+    except Exception as e:
+        components["database"] = {"status": "error", "detail": str(e)}
+
+    # 2. Embedding service
+    if settings.embedding_model:
+        try:
+            from .services.embedding_service import EmbeddingService
+            result = EmbeddingService.generate_embedding("health check")
+            if result is not None:
+                components["embedding"] = {
+                    "status": "ok",
+                    "model": settings.embedding_model,
+                    "dimensions": len(result),
+                }
+            else:
+                components["embedding"] = {
+                    "status": "error",
+                    "detail": "Embedding returned None",
+                    "model": settings.embedding_model,
+                }
+        except Exception as e:
+            components["embedding"] = {
+                "status": "error",
+                "detail": str(e),
+                "model": settings.embedding_model,
+            }
+    else:
+        components["embedding"] = {"status": "not_configured"}
+
+    # 3. Chat / LLM
+    if settings.chat_model:
+        components["chat"] = {"status": "configured", "model": settings.chat_model}
+    else:
+        components["chat"] = {"status": "not_configured"}
+
+    all_ok = all(
+        c.get("status") in ("ok", "not_configured", "configured")
+        for c in components.values()
+    )
+
+    return {
+        "status": "healthy" if all_ok else "degraded",
+        "uptime_seconds": round(time.monotonic() - _startup_time),
+        "version": "1.0.0",
+        "components": components,
     }

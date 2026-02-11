@@ -42,6 +42,24 @@ class Settings(BaseSettings):
         default="sqlite:///./isocrates.db",
         description="Database connection URL"
     )
+    # Connection pool tuning (PostgreSQL only; ignored for SQLite).
+    # Each persistent connection uses ~5-10 MB on the server.
+    db_pool_size: int = Field(
+        default=5,
+        description="Number of persistent database connections"
+    )
+    db_max_overflow: int = Field(
+        default=10,
+        description="Extra connections allowed during traffic bursts"
+    )
+    db_pool_timeout: int = Field(
+        default=30,
+        description="Seconds to wait for a connection from the pool before raising"
+    )
+    db_pool_recycle: int = Field(
+        default=1800,
+        description="Seconds before a connection is recycled (prevents stale connections)"
+    )
 
     # Webhook Configuration
     # HMAC secret for validating GitHub webhook signatures
@@ -99,10 +117,18 @@ class Settings(BaseSettings):
 
     # Chat / RAG Configuration
     # LiteLLM model string for RAG chat completions.
-    # Reuses embedding_api_key. Empty string = chat disabled.
+    # Empty string = chat disabled.
     chat_model: str = Field(
-        default="openai/gpt-4o-mini",
-        description="LiteLLM model for RAG chat completions"
+        default="",
+        description="LiteLLM model for RAG chat completions (empty = disabled)"
+    )
+    chat_api_key: str = Field(
+        default="",
+        description="API key for chat provider (falls back to embedding_api_key if empty)"
+    )
+    chat_api_base: str = Field(
+        default="",
+        description="Base URL for chat provider (optional, for custom endpoints)"
     )
     chat_max_context_docs: int = Field(
         default=5,

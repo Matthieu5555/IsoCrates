@@ -21,10 +21,7 @@ class TestHealth:
 
 class TestResponseHeaders:
 
-    def test_request_id_header(self, client):
+    def test_response_includes_middleware_headers(self, client):
         resp = client.get("/health")
         assert "x-request-id" in resp.headers
-
-    def test_response_time_header(self, client):
-        resp = client.get("/health")
         assert "x-response-time" in resp.headers

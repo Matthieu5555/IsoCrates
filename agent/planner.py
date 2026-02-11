@@ -104,6 +104,88 @@ class DocumentPlanner:
         self._TextContent = text_content_cls
         self._context_budget = context_budget
 
+    # ------------------------------------------------------------------
+    # LLM call with retry / JSON repair (shared by all plan methods)
+    # ------------------------------------------------------------------
+
+    def _call_planner_llm(self, prompt: str, *, label: str = "Planner") -> dict:
+        """Send a prompt to the planner LLM and return a parsed blueprint.
+
+        Handles up to 3 retries with conversational error feedback,
+        markdown fence stripping, ``json_repair``, and single-doc-folder
+        flattening.  Raises ``RuntimeError`` when all attempts fail.
+
+        Args:
+            prompt: Complete planner prompt (must request JSON with a
+                ``"documents"`` key).
+            label:  Log prefix for progress messages.
+
+        Returns:
+            Parsed blueprint dict containing at least ``"documents"``.
+        """
+        crate_path = f"{self.crate}{self.repo_name}".rstrip("/")
+        max_retries = 3
+        last_error: str | None = None
+        last_raw = ""
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                messages = [
+                    self._Message(role="user", content=[self._TextContent(text=prompt)])
+                ]
+                if attempt > 1 and last_raw:
+                    messages.append(self._Message(role="assistant", content=[self._TextContent(text=last_raw)]))
+                    messages.append(self._Message(role="user", content=[self._TextContent(
+                        text=f"Your response was not valid JSON. Error: {last_error}\n\n"
+                             "Please output ONLY a valid JSON object with the exact schema requested. "
+                             "No markdown fences, no commentary, no text before or after the JSON."
+                    )]))
+
+                response = self.planner_llm.completion(messages=messages)
+
+                raw_text = ""
+                for block in response.message.content:
+                    if hasattr(block, "text"):
+                        raw_text += block.text
+
+                json_text = raw_text.strip()
+                if json_text.startswith("```"):
+                    json_text = re.sub(r"^```(?:json)?\s*\n?", "", json_text)
+                    json_text = re.sub(r"\n?```\s*$", "", json_text)
+
+                from json_repair import repair_json
+                blueprint = json.loads(repair_json(json_text))
+
+                if isinstance(blueprint, dict) and "documents" in blueprint:
+                    docs = blueprint["documents"]
+                    for doc in docs:
+                        if "path" not in doc:
+                            doc["path"] = crate_path
+                    docs = _flatten_single_doc_folders(docs, crate_path)
+                    blueprint["documents"] = docs
+                    return blueprint
+
+                last_raw = raw_text
+                last_error = "Response was valid JSON but missing 'documents' key"
+                print(f"[{label}] Attempt {attempt}/{max_retries}: invalid blueprint structure, retrying...")
+
+            except json.JSONDecodeError as e:
+                last_raw = raw_text  # type: ignore[possibly-undefined]
+                last_error = str(e)
+                print(f"[{label}] Attempt {attempt}/{max_retries}: JSON parse error ({e}), retrying...")
+            except Exception as e:
+                last_error = str(e)
+                last_raw = ""
+                print(f"[{label}] Attempt {attempt}/{max_retries}: {e}, retrying...")
+
+        raise RuntimeError(
+            f"{label} failed after {max_retries} attempts. Last error: {last_error}"
+        )
+
+    # ------------------------------------------------------------------
+    # Standard planning (single-pass)
+    # ------------------------------------------------------------------
+
     def plan(
         self,
         scout_reports: str,
@@ -115,11 +197,6 @@ class DocumentPlanner:
         Falls back to a deterministic plan on failure.
         """
         crate_path = f"{self.crate}{self.repo_name}".rstrip("/")
-
-        doc_types_desc = "\n".join(
-            f'  - "{k}": {v["title"]}'
-            for k, v in sorted(DOCUMENT_TYPES.items())
-        )
 
         existing_docs_section = ""
         if existing_docs:
@@ -315,70 +392,134 @@ CRITICAL RULES:
 """
 
         print("[Planner] Analyzing scout reports and designing blueprint...")
-        max_retries = 3
-        last_error = None
-        last_raw = ""
+        blueprint = self._call_planner_llm(planner_prompt, label="Planner")
+        docs = blueprint["documents"]
+        print(f"[Planner] Blueprint ready: {len(docs)} documents")
+        print(f"   Complexity: {blueprint.get('complexity', 'unknown')}")
+        print(f"   Journey: {blueprint.get('reader_journey', 'N/A')}")
+        for doc in docs:
+            rationale = doc.get("rationale", "")
+            print(f"   - {doc['title']} ({doc['doc_type']}): {rationale[:60]}...")
+        return blueprint
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                messages = [
-                    self._Message(role="user", content=[self._TextContent(text=planner_prompt)])
-                ]
-                # On retry, feed back the failed response and ask for valid JSON
-                if attempt > 1 and last_raw:
-                    messages.append(self._Message(role="assistant", content=[self._TextContent(text=last_raw)]))
-                    messages.append(self._Message(role="user", content=[self._TextContent(
-                        text=f"Your response was not valid JSON. Error: {last_error}\n\n"
-                             "Please output ONLY a valid JSON object with the exact schema requested. "
-                             "No markdown fences, no commentary, no text before or after the JSON."
-                    )]))
+    # ------------------------------------------------------------------
+    # Integration planning (cross-cutting docs for partitioned repos)
+    # ------------------------------------------------------------------
 
-                response = self.planner_llm.completion(messages=messages)
+    def plan_integration(
+        self,
+        area_summaries: list[dict[str, Any]],
+        all_titles: list[str],
+        existing_docs: list[dict] | None = None,
+    ) -> dict:
+        """Plan cross-cutting hub documents that span multiple documentation areas.
 
-                raw_text = ""
-                for block in response.message.content:
-                    if hasattr(block, "text"):
-                        raw_text += block.text
+        Called after all area-specific pipelines have completed.  Produces
+        only hub pages (Overview, Getting Started, Architecture) that
+        wikilink into area-specific pages, never duplicating their content.
 
-                json_text = raw_text.strip()
-                if json_text.startswith("```"):
-                    json_text = re.sub(r"^```(?:json)?\s*\n?", "", json_text)
-                    json_text = re.sub(r"\n?```\s*$", "", json_text)
+        Args:
+            area_summaries: One dict per area with keys ``name``,
+                ``summary`` (one-paragraph from area planner), ``modules``
+                (list of module names), and ``doc_titles`` (generated pages).
+            all_titles: Every page title generated across all areas.
+            existing_docs: Optional list for title/path reuse.
 
-                from json_repair import repair_json
-                blueprint = json.loads(repair_json(json_text))
+        Returns:
+            Blueprint dict with ``repo_summary``, ``complexity``, ``documents``.
+        """
+        crate_path = f"{self.crate}{self.repo_name}".rstrip("/")
 
-                if isinstance(blueprint, dict) and "documents" in blueprint:
-                    docs = blueprint["documents"]
-                    for doc in docs:
-                        if "path" not in doc:
-                            doc["path"] = crate_path
-                    docs = _flatten_single_doc_folders(docs, crate_path)
-                    blueprint["documents"] = docs
-                    print(f"[Planner] Blueprint ready: {len(docs)} documents")
-                    print(f"   Complexity: {blueprint.get('complexity', 'unknown')}")
-                    print(f"   Journey: {blueprint.get('reader_journey', 'N/A')}")
-                    for doc in docs:
-                        rationale = doc.get("rationale", "")
-                        print(f"   - {doc['title']} ({doc['doc_type']}): {rationale[:60]}...")
-                    return blueprint
+        area_section = ""
+        for area in area_summaries:
+            area_section += f"\n### {area['name']}\n"
+            area_section += f"{area['summary']}\n"
+            area_section += f"Modules: {', '.join(area['modules'])}\n"
+            area_section += f"Pages: {', '.join(area['doc_titles'])}\n"
 
-                last_raw = raw_text
-                last_error = "Response was valid JSON but missing 'documents' key"
-                print(f"[Planner] Attempt {attempt}/{max_retries}: invalid blueprint structure, retrying...")
+        titles_section = "\n".join(f"  - [[{t}]]" for t in sorted(all_titles))
 
-            except json.JSONDecodeError as e:
-                last_raw = raw_text
-                last_error = str(e)
-                print(f"[Planner] Attempt {attempt}/{max_retries}: JSON parse error ({e}), retrying...")
-            except Exception as e:
-                last_error = str(e)
-                last_raw = ""
-                print(f"[Planner] Attempt {attempt}/{max_retries}: {e}, retrying...")
+        existing_section = ""
+        if existing_docs:
+            existing_section = "\nEXISTING DOCUMENTS (reuse titles/paths where possible):\n"
+            for doc in existing_docs:
+                existing_section += f'  - "{doc["title"]}" at "{doc["path"]}" ({doc["doc_type"]})\n'
 
-        raise RuntimeError(
-            f"Planner failed after {max_retries} attempts. Last error: {last_error}"
-        )
+        prompt = f"""You are a documentation architect creating CROSS-CUTTING hub pages for a
+large codebase. Area-specific documentation has already been written by
+specialized teams. Your job is to create 3-5 high-level pages that tie
+everything together.
+
+AREAS OF THE CODEBASE:
+{area_section}
+
+ALL EXISTING WIKI PAGES (available for wikilinks):
+{titles_section}
+{existing_section}
+THE PAGES YOU MUST CREATE:
+1. "Overview" at "{crate_path}" — what the project is, system diagram linking to area pages
+2. "Getting Started" at "{crate_path}" — prerequisites, install, run, linking to area-specific guides
+3. "Capabilities & User Stories" at "{crate_path}" — business-facing: what users can DO, feature matrix,
+   end-to-end workflows, user stories
+
+You MAY also create 1-2 additional integration pages if the area summaries
+reveal cross-cutting concerns (e.g., "Authentication Flow" if auth spans
+multiple areas, or "Data Pipeline" if data flows through several areas).
+
+RULES:
+- These pages are SHORT (1-2 printed pages) and act as navigation hubs
+- Every page must wikilink to 10-20+ area-specific pages using [[Page Title]]
+- Use the exact titles from the ALL EXISTING WIKI PAGES list above
+- Include a system diagram (mermaid) showing how areas relate
+- Do NOT duplicate content from area-specific pages — link to them instead
+- Each page needs a "description" (2-3 sentences for search/MCP discovery)
+
+OUTPUT INSTRUCTIONS:
+Output ONLY a valid JSON object (no markdown fences, no commentary).
+
+{{
+  "repo_summary": "One paragraph describing the whole project",
+  "complexity": "large",
+  "reader_journey": "Overview → Getting Started → [area pages]",
+  "documents": [
+    {{
+      "doc_type": "overview",
+      "title": "Overview",
+      "path": "{crate_path}",
+      "description": "...",
+      "rationale": "...",
+      "sections": [
+        {{
+          "heading": "What is this project?",
+          "format_rationale": "...",
+          "rich_content": ["diagram:system overview showing areas"]
+        }},
+        {{
+          "heading": "Key Areas",
+          "format_rationale": "...",
+          "rich_content": ["table:areas with links to their pages"]
+        }}
+      ],
+      "key_files_to_read": ["README.md"],
+      "wikilinks_out": ["Getting Started", "<10-20 area page titles>"]
+    }}
+  ]
+}}
+
+CRITICAL: Output ONLY the JSON object. No markdown fences, no commentary.
+"""
+
+        print("[Integration Planner] Designing cross-cutting hub pages...")
+        blueprint = self._call_planner_llm(prompt, label="Integration Planner")
+        docs = blueprint["documents"]
+        print(f"[Integration Planner] Blueprint ready: {len(docs)} hub documents")
+        for doc in docs:
+            print(f"   - {doc['title']} ({doc['doc_type']})")
+        return blueprint
+
+    # ------------------------------------------------------------------
+    # Hierarchical planning (chunked report sets)
+    # ------------------------------------------------------------------
 
     def plan_hierarchical(
         self,
@@ -513,62 +654,9 @@ Each document must have: doc_type, title, path, description, sections,
 key_files_to_read, wikilinks_out. Output ONLY JSON — no fences, no commentary.
 """
         print(f"[Planner] Phase 2: Merging {len(all_specs)} specs into global blueprint...")
-        max_retries = 3
-        last_error = None
-        last_raw = ""
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                messages = [
-                    self._Message(role="user", content=[self._TextContent(text=merge_prompt)])
-                ]
-                if attempt > 1 and last_raw:
-                    messages.append(self._Message(role="assistant", content=[self._TextContent(text=last_raw)]))
-                    messages.append(self._Message(role="user", content=[self._TextContent(
-                        text=f"Your response was not valid JSON. Error: {last_error}\n\n"
-                             "Please output ONLY a valid JSON object with the exact schema requested. "
-                             "No markdown fences, no commentary, no text before or after the JSON."
-                    )]))
-
-                response = self.planner_llm.completion(messages=messages)
-                raw = ""
-                for block in response.message.content:
-                    if hasattr(block, "text"):
-                        raw += block.text
-                raw = raw.strip()
-                if raw.startswith("```"):
-                    raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
-                    raw = re.sub(r"\n?```\s*$", "", raw)
-
-                from json_repair import repair_json
-                blueprint = json.loads(repair_json(raw))
-
-                if isinstance(blueprint, dict) and "documents" in blueprint:
-                    docs = blueprint["documents"]
-                    for doc in docs:
-                        if "path" not in doc:
-                            doc["path"] = crate_path
-                    docs = _flatten_single_doc_folders(docs, crate_path)
-                    blueprint["documents"] = docs
-                    print(f"[Planner] Hierarchical blueprint ready: {len(docs)} documents")
-                    return blueprint
-
-                last_raw = raw
-                last_error = "Response was valid JSON but missing 'documents' key"
-                print(f"[Planner] Merge attempt {attempt}/{max_retries}: invalid structure, retrying...")
-
-            except json.JSONDecodeError as e:
-                last_raw = raw
-                last_error = str(e)
-                print(f"[Planner] Merge attempt {attempt}/{max_retries}: JSON parse error ({e}), retrying...")
-            except Exception as e:
-                last_error = str(e)
-                last_raw = ""
-                print(f"[Planner] Merge attempt {attempt}/{max_retries}: {e}, retrying...")
-
-        raise RuntimeError(
-            f"Planner merge failed after {max_retries} attempts. Last error: {last_error}"
-        )
+        blueprint = self._call_planner_llm(merge_prompt, label="Planner Merge")
+        print(f"[Planner] Hierarchical blueprint ready: {len(blueprint['documents'])} documents")
+        return blueprint
 
 
 

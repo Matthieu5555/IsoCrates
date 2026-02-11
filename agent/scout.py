@@ -79,6 +79,79 @@ class ScoutRunner:
     # Public interface
     # ------------------------------------------------------------------
 
+    def run_area(self, area: "DocumentationArea") -> ScoutResult:
+        """Run scouts scoped to a single documentation area.
+
+        Filters the repo's module map to only the area's modules, then
+        delegates to module-based scouting.  The full repo is still
+        analysed (so cross-module import edges are preserved), but
+        scouts only explore files belonging to this area.
+
+        For areas with a single module, falls back to topic-based
+        scouting for broader coverage.
+
+        Args:
+            area: A ``DocumentationArea`` from the partitioner.
+
+        Returns:
+            ``ScoutResult`` with reports focused on this area's modules.
+        """
+        from partitioner import DocumentationArea  # deferred to avoid circular import
+
+        full_metrics = self._estimate_repo(self.repo_path, self.crate)
+        full_module_map: dict[str, ModuleInfo] = full_metrics.get("module_map", {})
+
+        # Filter to area's modules
+        area_names = set(area.module_names)
+        area_module_map = {
+            name: info for name, info in full_module_map.items()
+            if name in area_names
+        }
+        if not area_module_map:
+            area_module_map = full_module_map  # safety fallback
+
+        area_tokens = sum(m.token_estimate for m in area_module_map.values())
+        budget_ratio = area_tokens / self._context_window
+
+        print(f"\n[Area Scout] {area.name}: {len(area_module_map)} modules, "
+              f"~{area_tokens:,} tokens (budget_ratio={budget_ratio:.2f})")
+
+        if len(area_module_map) >= 2:
+            reports = self._run_module_scouts(area_module_map, budget_ratio)
+        else:
+            # Single module — topic scouts give better breadth
+            area_metrics = dict(full_metrics)
+            area_metrics["module_map"] = area_module_map
+            area_metrics["token_estimate"] = area_tokens
+            area_metrics["file_manifest"] = list(area.files)
+            area_metrics["file_count"] = len(area.files)
+            reports = self._run_topic_scouts(area_metrics, budget_ratio)
+
+        combined = "\n\n---\n\n".join(reports.values())
+        print(f"[Area Scout] {area.name}: {len(combined):,} chars total")
+
+        # Lighter compression — areas are sized to fit the planner's context
+        compression_target = int(self._planner_context_window * 0.5 * 4)
+        compression_target = max(compression_target, 15_000)
+
+        if len(combined) > compression_target:
+            print(f"[Area Scout] Compressing ({len(combined):,} → ~{compression_target // 1000}K)...")
+            compressed_by_key = self._compress_reports(reports, target_chars=compression_target)
+            compressed_text = "\n\n---\n\n".join(compressed_by_key.values())
+        else:
+            compressed_by_key = reports
+            compressed_text = combined
+
+        return ScoutResult(
+            reports_by_key=reports,
+            compressed_reports_by_key=compressed_by_key,
+            combined_text=combined,
+            compressed_text=compressed_text,
+            repo_metrics=full_metrics,
+            module_map=area_module_map,
+            budget_ratio=budget_ratio,
+        )
+
     def run(self) -> ScoutResult:
         """Run full scout exploration (topic or module-based).
 

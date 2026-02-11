@@ -52,14 +52,15 @@ class DocumentRepository(BaseRepository[Document]):
 
         Each prefix matches documents whose path equals the prefix or starts
         with prefix + '/'.  An empty string means root access (matches all).
-        Returns None when no filtering is needed (root access or no prefixes).
+        Always returns a valid filter expression — callers can pass the result
+        directly to ``.filter()`` without checking for None.
         """
         if not allowed_prefixes:
             return Document.id.is_(None)  # no grants → match nothing
 
-        # Root grant present → no filtering needed
+        # Root grant present → match everything
         if "" in allowed_prefixes:
-            return None
+            return text("1=1")
 
         clauses = []
         for prefix in allowed_prefixes:
@@ -126,9 +127,7 @@ class DocumentRepository(BaseRepository[Document]):
         if repo_url:
             query = query.filter(Document.repo_url == repo_url)
         if allowed_prefixes is not None:
-            grant_filter = self._grant_filter(allowed_prefixes)
-            if grant_filter is not None:
-                query = query.filter(grant_filter)
+            query = query.filter(self._grant_filter(allowed_prefixes))
         return query.offset(skip).limit(limit).all()
 
     def get_tracked_repo_urls(self) -> List[str]:
@@ -142,22 +141,64 @@ class DocumentRepository(BaseRepository[Document]):
         )
         return [row[0] for row in rows]
 
-    def update(self, doc_id: str, document: DocumentUpdate) -> Document:
-        """Update document content. Raises DocumentNotFoundError."""
-        db_document = self.get_by_id(doc_id)
-        db_document.content = document.content
-        db_document.content_preview = generate_content_preview(document.content)
-        db_document.generation_count += 1
-        db_document.version = (db_document.version or 0) + 1
+    def update(self, doc_id: str, document: DocumentUpdate, expected_version: int | None = None) -> Document:
+        """Update document content atomically. Raises DocumentNotFoundError or ConflictError.
 
-        if document.description is not None:
-            db_document.description = document.description
-            # Clear embedding — content changed, needs re-embedding
-            db_document.embedding_model = None
+        When *expected_version* is provided, the UPDATE uses a WHERE clause
+        that includes ``version = expected_version``, making the version check
+        and the write a single atomic operation.  If zero rows are affected,
+        another writer won the race and ConflictError is raised.
+        """
+        if expected_version is not None:
+            from ..exceptions import ConflictError
 
-        self.db.flush()
-        self.db.refresh(db_document)
-        return db_document
+            new_preview = generate_content_preview(document.content)
+            params: dict = {
+                "doc_id": doc_id,
+                "content": document.content,
+                "preview": new_preview,
+                "expected_version": expected_version,
+            }
+
+            sql = (
+                "UPDATE documents"
+                " SET content = :content,"
+                "     content_preview = :preview,"
+                "     generation_count = generation_count + 1,"
+                "     version = version + 1,"
+                "     updated_at = CURRENT_TIMESTAMP"
+            )
+            if document.description is not None:
+                sql += ", description = :description, embedding_model = NULL"
+                params["description"] = document.description
+
+            sql += " WHERE id = :doc_id AND version = :expected_version"
+
+            result = self.db.execute(text(sql), params)
+            if result.rowcount == 0:
+                # Either document doesn't exist or version mismatched
+                if self.get_by_id_optional(doc_id) is None:
+                    raise DocumentNotFoundError(doc_id)
+                raise ConflictError(doc_id)
+
+            # Expire the ORM cache and reload the fresh row
+            self.db.expire_all()
+            return self.get_by_id(doc_id)
+        else:
+            # No version check — ORM-style update (used by internal operations)
+            db_document = self.get_by_id(doc_id)
+            db_document.content = document.content
+            db_document.content_preview = generate_content_preview(document.content)
+            db_document.generation_count += 1
+            db_document.version = (db_document.version or 0) + 1
+
+            if document.description is not None:
+                db_document.description = document.description
+                db_document.embedding_model = None
+
+            self.db.flush()
+            self.db.refresh(db_document)
+            return db_document
 
     def delete(self, doc_id: str) -> bool:
         """Hard delete document. Prefer soft_delete() for user-facing operations."""
@@ -206,9 +247,7 @@ class DocumentRepository(BaseRepository[Document]):
             .filter(Document.deleted_at.isnot(None))
         )
         if allowed_prefixes is not None:
-            grant_filter = self._grant_filter(allowed_prefixes)
-            if grant_filter is not None:
-                query = query.filter(grant_filter)
+            query = query.filter(self._grant_filter(allowed_prefixes))
         return query.order_by(Document.deleted_at.desc()).offset(skip).limit(limit).all()
 
     def purge_expired(self, days: int = 30) -> int:
@@ -226,9 +265,7 @@ class DocumentRepository(BaseRepository[Document]):
         """Simple LIKE search fallback (excludes soft-deleted)."""
         q = self._base_query().filter(Document.content.contains(query))
         if allowed_prefixes is not None:
-            grant_filter = self._grant_filter(allowed_prefixes)
-            if grant_filter is not None:
-                q = q.filter(grant_filter)
+            q = q.filter(self._grant_filter(allowed_prefixes))
         return q.limit(limit).all()
 
     def search_fts(
@@ -246,13 +283,17 @@ class DocumentRepository(BaseRepository[Document]):
         Uses PostgreSQL tsvector/tsquery or SQLite FTS5 depending on database.
         Falls back to LIKE search if FTS is not available.
         """
+        # When filtering by keywords in Python (post-SQL), over-fetch so that
+        # discarded rows don't reduce the final result count below `limit`.
+        sql_limit = min(limit * 5, 200) if keywords else limit
+
         if is_postgresql():
             return self._search_fts_postgresql(
-                query, limit, path_prefix, keywords, date_from, date_to, allowed_prefixes
+                query, sql_limit, path_prefix, keywords, date_from, date_to, allowed_prefixes, limit
             )
         else:
             return self._search_fts_sqlite(
-                query, limit, path_prefix, keywords, date_from, date_to, allowed_prefixes
+                query, sql_limit, path_prefix, keywords, date_from, date_to, allowed_prefixes, limit
             )
 
     def _search_fts_postgresql(
@@ -264,6 +305,7 @@ class DocumentRepository(BaseRepository[Document]):
         date_from: Optional[datetime],
         date_to: Optional[datetime],
         allowed_prefixes: Optional[list[str]],
+        final_limit: Optional[int] = None,
     ) -> list[SearchResultResponse]:
         """PostgreSQL full-text search using tsvector/tsquery."""
         try:
@@ -318,11 +360,11 @@ class DocumentRepository(BaseRepository[Document]):
             sql += " ORDER BY rank DESC LIMIT :limit"
 
             rows = self.db.execute(text(sql), params).fetchall()
-            return self._process_fts_results(rows, keywords)
+            return self._process_fts_results(rows, keywords, final_limit or limit)
 
         except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError):
             # Fall back to LIKE search
-            return self._fallback_like_search(query, limit, allowed_prefixes)
+            return self._fallback_like_search(query, final_limit or limit, allowed_prefixes)
 
     def _search_fts_sqlite(
         self,
@@ -333,6 +375,7 @@ class DocumentRepository(BaseRepository[Document]):
         date_from: Optional[datetime],
         date_to: Optional[datetime],
         allowed_prefixes: Optional[list[str]],
+        final_limit: Optional[int] = None,
     ) -> list[SearchResultResponse]:
         """SQLite FTS5 full-text search."""
         try:
@@ -384,18 +427,21 @@ class DocumentRepository(BaseRepository[Document]):
             sql += " ORDER BY rank LIMIT :limit"
 
             rows = self.db.execute(text(sql), params).fetchall()
-            return self._process_fts_results(rows, keywords)
+            return self._process_fts_results(rows, keywords, final_limit or limit)
 
         except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError):
             # FTS5 table may not exist yet — fall back to LIKE search
-            return self._fallback_like_search(query, limit, allowed_prefixes)
+            return self._fallback_like_search(query, final_limit or limit, allowed_prefixes)
 
-    def _process_fts_results(self, rows, keywords: Optional[list]) -> list[SearchResultResponse]:
+    def _process_fts_results(self, rows, keywords: Optional[list], final_limit: int = 20) -> list[SearchResultResponse]:
         """Process FTS result rows into typed response objects.
 
         Both PostgreSQL and SQLite FTS queries SELECT the same column order:
         id, title, path, doc_type, keywords, repo_name, content_preview,
         updated_at, generation_count, rank, snippet, description.
+
+        When keyword filtering is active, SQL over-fetches and this method
+        trims to ``final_limit`` after filtering.
         """
         import json
 
@@ -417,6 +463,9 @@ class DocumentRepository(BaseRepository[Document]):
             if keywords:
                 if not any(k in (doc_keywords or []) for k in keywords):
                     continue
+
+            if len(results) >= final_limit:
+                break
 
             results.append(SearchResultResponse(
                 id=doc_id,
@@ -460,9 +509,7 @@ class DocumentRepository(BaseRepository[Document]):
         """Get most recently updated active documents."""
         query = self._base_query()
         if allowed_prefixes is not None:
-            grant_filter = self._grant_filter(allowed_prefixes)
-            if grant_filter is not None:
-                query = query.filter(grant_filter)
+            query = query.filter(self._grant_filter(allowed_prefixes))
         return query.order_by(Document.updated_at.desc()).limit(limit).all()
 
     # -- Embedding methods --------------------------------------------------

@@ -54,6 +54,9 @@ class TestDocumentCRUD:
         assert resp.status_code == 200
         assert len(resp.json()) >= 2
 
+        # Regression: /recent must not be shadowed by /{doc_id}
+        assert client.get("/api/docs/recent").status_code == 200
+
 
 class TestUpsertIdempotency:
     """POSTing the same document twice should update, not duplicate."""
@@ -101,21 +104,10 @@ class TestSoftDelete:
         docs = client.get("/api/docs").json()
         assert all(d["id"] != doc_id for d in docs)
 
-        # Present in trash
+        # Present in trash with deleted_at timestamp
         trash = client.get("/api/docs/trash").json()
-        assert any(d["id"] == doc_id for d in trash)
-
-    def test_trash_endpoint_reachable(self, client):
-        """Regression: /trash must not be shadowed by /{doc_id}."""
-        resp = client.get("/api/docs/trash")
-        assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
-
-    def test_recent_endpoint_reachable(self, client):
-        """Regression: /recent must not be shadowed by /{doc_id}."""
-        resp = client.get("/api/docs/recent")
-        assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
+        trashed = next(d for d in trash if d["id"] == doc_id)
+        assert trashed["deleted_at"] is not None
 
     def test_restore_from_trash(self, client):
         doc_id = self._create(client)
@@ -156,22 +148,20 @@ class TestSoftDelete:
         results = client.get("/api/docs/search/", params={"q": "unique_softdel_marker_999"}).json()
         assert all(r.get("id") != doc_id for r in results)
 
-    def test_delete_idempotent(self, client):
+    def test_operations_are_idempotent(self, client):
         doc_id = self._create(client)
+
+        # Soft-delete twice succeeds
         assert client.delete(f"/api/docs/{doc_id}").status_code == 204
         assert client.delete(f"/api/docs/{doc_id}").status_code == 204
 
-    def test_restore_idempotent_on_active_doc(self, client):
-        doc_id = self._create(client)
-        # Restore an active (non-deleted) doc should succeed
-        resp = client.post(f"/api/docs/{doc_id}/restore")
-        assert resp.status_code == 200
+        # Restore an already-active doc succeeds
+        client.post(f"/api/docs/{doc_id}/restore")
+        assert client.post(f"/api/docs/{doc_id}/restore").status_code == 200
 
-    def test_permanent_delete_idempotent(self, client):
-        doc_id = self._create(client)
+        # Permanent delete twice succeeds
         client.delete(f"/api/docs/{doc_id}")
         assert client.delete(f"/api/docs/{doc_id}/permanent").status_code == 204
-        # Second call still succeeds (already gone)
         assert client.delete(f"/api/docs/{doc_id}/permanent").status_code == 204
 
     def test_versions_preserved_after_restore(self, client):
@@ -188,10 +178,3 @@ class TestSoftDelete:
         assert resp.status_code == 200
         assert len(resp.json()) >= 2
 
-    def test_trash_shows_deleted_at_timestamp(self, client):
-        doc_id = self._create(client)
-        client.delete(f"/api/docs/{doc_id}")
-
-        trash = client.get("/api/docs/trash").json()
-        trashed = next(d for d in trash if d["id"] == doc_id)
-        assert trashed["deleted_at"] is not None

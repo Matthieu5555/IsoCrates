@@ -29,15 +29,14 @@ if DATABASE_URL.startswith("sqlite"):
         cursor.close()
 else:
     # PostgreSQL: connection pool sized for typical web workloads.
-    # Persistent connections kept open (used by all API endpoints and the worker).
-    # Increase for high-concurrency deployments; each connection uses ~5-10 MB on the server.
-    PG_POOL_SIZE = 5
-    # Extra connections allowed during traffic bursts (returned to pool when idle).
-    PG_MAX_OVERFLOW = 10
+    # All pool parameters are configurable via DB_POOL_* environment variables.
+    from .core.config import settings as _db_settings
     engine = create_engine(
         DATABASE_URL,
-        pool_size=PG_POOL_SIZE,
-        max_overflow=PG_MAX_OVERFLOW,
+        pool_size=_db_settings.db_pool_size,
+        max_overflow=_db_settings.db_max_overflow,
+        pool_timeout=_db_settings.db_pool_timeout,
+        pool_recycle=_db_settings.db_pool_recycle,
         # Detects stale connections before use (prevents "server closed the connection" errors).
         pool_pre_ping=True,
     )
@@ -50,9 +49,16 @@ Base = declarative_base()
 
 
 def get_db():
-    """Dependency for FastAPI routes to get database session."""
+    """Dependency for FastAPI routes to get database session.
+
+    Rolls back the transaction on unhandled exceptions so that the
+    connection is returned to the pool in a clean state.
+    """
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
