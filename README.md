@@ -1,5 +1,7 @@
 # IsoCrates
 
+> **Live demo:** [matthieu-separt.site/IsoCrates](https://matthieu-separt.site/IsoCrates/)
+
 IsoCrates auto-generates and maintains technical documentation from your Git repositories. Deploy it internally and every push keeps your docs current, with access controls, semantic search, and an MCP server your AI coding tools can query directly.
 
 ## Why Deploy This
