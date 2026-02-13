@@ -103,8 +103,10 @@ The backend is Python with FastAPI and SQLAlchemy (SQLite in development, Postgr
 
 | Document | Purpose |
 |----------|---------|
+| [Quickstart](QUICKSTART.md) | Zero to production in 8 steps |
 | [Architecture](docs/ARCHITECTURE.md) | System design, data model, security model |
 | [Deployment Guide](docs/DEPLOYING_AT_YOUR_ORGANIZATION.md) | Production setup: secrets, auth, webhooks, database, security checklist |
+| [LLM Providers](docs/LLM_PROVIDERS.md) | Choosing and configuring LLM providers, cost estimates |
 | [Usage Guide](docs/USAGE_GUIDE.md) | Folders, documents, search, personal trees, API examples |
 | [Changelog](docs/CHANGELOG.md) | Version history and release notes |
 | [Further Development](docs/FURTHER_DEVELOPMENT.md) | Roadmap and open tasks |
