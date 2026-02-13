@@ -1,18 +1,10 @@
 # Contributing to IsoCrates
 
-Thank you for your interest in contributing to IsoCrates! This guide will help you get started.
+Thank you for your interest in contributing. This guide covers the development setup, contribution workflow, and code style expectations.
 
 ## Development setup
 
-### Prerequisites
-
-- Python 3.13+ (backend)
-- Node.js 18+ (frontend)
-- PostgreSQL 16+ or SQLite (database)
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
-- Docker (optional, for the agent container)
-
-### Getting started
+You will need Python 3.13 or later for the backend, Node.js 18 or later for the frontend, PostgreSQL 16 or later (or SQLite) for the database, [uv](https://docs.astral.sh/uv/) as the Python package manager, and optionally Docker for the agent container.
 
 ```bash
 # Clone the repository
@@ -38,33 +30,15 @@ The backend runs at `http://localhost:8000` and the frontend at `http://localhos
 
 ### Reporting bugs
 
-Open a GitHub issue with:
-- Steps to reproduce
-- Expected vs actual behaviour
-- Environment details (OS, Python/Node version, browser)
+Open a GitHub issue describing the steps to reproduce the problem, the expected versus actual behaviour, and your environment details (OS, Python/Node version, browser).
 
 ### Suggesting features
 
-Open a GitHub issue describing:
-- The problem you're trying to solve
-- Your proposed solution
-- Any alternatives you considered
+Open a GitHub issue that explains the problem you are trying to solve, your proposed solution, and any alternatives you considered.
 
 ### Submitting code
 
-1. Fork the repository
-2. Create a feature branch from `main`
-3. Make your changes
-4. Run tests (see below)
-5. Open a pull request
-
-### Pull request guidelines
-
-- Keep PRs focused on a single change
-- Write descriptive commit messages
-- Add tests for new functionality
-- Update documentation if behaviour changes
-- Ensure all tests pass before requesting review
+Fork the repository and create a feature branch from `main`. Make your changes, run the tests (see below), and open a pull request. Keep each PR focused on a single change, write descriptive commit messages, add tests for new functionality, and update documentation if behaviour changes. Make sure all tests pass before requesting review.
 
 ## Running tests
 
@@ -80,11 +54,7 @@ npm run test
 
 ## Code style
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for detailed coding conventions. Key points:
-
-- **Backend:** Follow the deep module pattern — business logic lives in services, endpoints are thin (5-15 lines)
-- **Frontend:** Use Tailwind CSS via variant objects from `lib/styles/`, no inline styles
-- **General:** No `print()` in backend code (use `logging`), no `alert()` in frontend code (use toast notifications)
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for detailed coding conventions. Think of it like a restaurant kitchen: services handle the cooking (business logic), and endpoints are the waiters that carry plates to the table (5 to 15 lines each). On the frontend, use Tailwind CSS via variant objects from `lib/styles/` with no inline styles. Never use `print()` in backend code (use `logging` instead), and never use `alert()` in frontend code (use toast notifications).
 
 ## Project structure
 
@@ -98,4 +68,4 @@ docs/        # Deployment and development guides
 
 ## Questions?
 
-If you're unsure about anything, open an issue and we'll be happy to help.
+If you are unsure about anything, open an issue and we will help.

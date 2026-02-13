@@ -4,27 +4,22 @@ Orthogonal development tasks for IsoCrates, each with clear boundaries, integrat
 
 ---
 
-## T4 — Content Migration Pipeline
+## T4 -- Content Migration Pipeline
 
 Enable importing existing documentation from external platforms into IsoCrates.
 
-**Current state:** The only ingestion path is `agent/openhands_doc.py` → git clone → AI generation → `POST /api/docs`. The document model (`backend/app/models/document.py:17-19`) already supports `repo_url = None` for standalone documents, and `source_type` property (line 60) distinguishes repository vs standalone.
+**Current state:** The only ingestion path is `agent/openhands_doc.py`, which clones a git repo, runs AI generation, and posts via `POST /api/docs`. The document model (`backend/app/models/document.py:17-19`) already supports `repo_url = None` for standalone documents, and the `source_type` property (line 60) distinguishes repository documents from standalone ones.
 
 **What changes:**
-- New backend module: `backend/app/services/import_service.py` with adapters per source:
-  - Word (.docx): file upload endpoint, parse with python-docx, convert to markdown.
-  - Confluence: REST API adapter, convert storage format (XHTML) to markdown.
-  - Notion: API adapter, convert block JSON to markdown.
-  - Google Docs: Drive API adapter (OAuth2), export as markdown.
-- New API endpoints: `POST /api/import/upload` (file-based), `POST /api/import/connect` (API-based sources).
-- Content normalization: each adapter outputs markdown + a path mapping (source hierarchy → IsoCrates `path` field).
-- Batch creation: call `DocumentService.create_or_update_document()` per page — no new storage logic needed.
-- Source tracking: use existing `repo_url` field (nullable) for source URL, `keywords` field for source platform tag (e.g., `["Imported", "Confluence"]`).
+
+A new backend module (`backend/app/services/import_service.py`) provides adapters for each source platform. The Word (.docx) adapter accepts file uploads and parses them with python-docx into markdown. The Confluence adapter calls the REST API and converts storage format (XHTML) to markdown. The Notion adapter converts block JSON to markdown, and the Google Docs adapter uses the Drive API with OAuth2 to export as markdown.
+
+Two new API endpoints handle imports: `POST /api/import/upload` for file-based sources and `POST /api/import/connect` for API-based sources. Each adapter outputs markdown plus a path mapping that translates the source hierarchy into the IsoCrates `path` field. Batch creation calls `DocumentService.create_or_update_document()` per page, so no new storage logic is needed. Source tracking reuses the existing `repo_url` field (nullable) for the source URL and the `keywords` field for a source platform tag (e.g., `["Imported", "Confluence"]`).
 
 **Files touched:**
 - New: `backend/app/services/import_service.py`, `backend/app/api/imports.py`
-- `backend/app/main.py` — register new router
-- `backend/requirements.txt` — python-docx, mammoth, or similar
+- `backend/app/main.py` -- register new router
+- `backend/requirements.txt` -- python-docx, mammoth, or similar
 - New: `frontend/components/import/ImportDialog.tsx` (UI for upload/connect)
 
 **Dependencies:** None strictly, but T3 (rich editor) makes the imported content editable with proper table support.
@@ -39,23 +34,21 @@ Enable importing existing documentation from external platforms into IsoCrates.
 
 ---
 
-## T12 — Performance Monitoring Dashboard
+## T12 -- Performance Monitoring Dashboard
 
 Visibility into system health and agent performance.
 
-**Current state:** No monitoring. No metrics collection. Health check exists at `GET /health` (`backend/app/main.py`) but returns only a static OK.
+**Current state:** No monitoring or metrics collection exists. A health check at `GET /health` (`backend/app/main.py`) returns only a static OK.
 
 **What changes:**
-- Instrument the backend with Prometheus metrics (request count, latency histograms, error rates).
-- Agent metrics: generation duration, token usage, success/failure rate (logged in `author_metadata` JSON, `backend/app/models/version.py`).
-- Dashboard: lightweight frontend page or Grafana integration.
-- Extend `/health` to return database status, document count, and last generation timestamp.
+
+The backend gets instrumented with Prometheus metrics covering request count, latency histograms, and error rates. Agent metrics (generation duration, token usage, success/failure rate) are logged in the `author_metadata` JSON field on `backend/app/models/version.py`. A lightweight frontend page or Grafana integration provides the dashboard. The `/health` endpoint is extended to return database status, document count, and last generation timestamp.
 
 **Files touched:**
-- `backend/app/main.py` — Prometheus middleware, extended health endpoint
-- `backend/requirements.txt` — prometheus-fastapi-instrumentator or similar
+- `backend/app/main.py` -- Prometheus middleware, extended health endpoint
+- `backend/requirements.txt` -- prometheus-fastapi-instrumentator or similar
 - New: `frontend/app/admin/monitoring/page.tsx` (or Grafana config)
-- `docker-compose.yml` — Prometheus + Grafana services (optional)
+- `docker-compose.yml` -- Prometheus + Grafana services (optional)
 
 **Dependencies:** None.
 
@@ -68,24 +61,21 @@ Visibility into system health and agent performance.
 
 ---
 
-## T16 — AI Chat Assistant
+## T16 -- AI Chat Assistant
 
 Add an AI-powered chat sidebar for navigating documentation, recommending relevant docs, and answering questions directly from documentation content.
 
-**Current state:** No chat feature exists. Users navigate via tree and CMD+K search.
+**Current state:** No chat feature exists. Users navigate via the tree and CMD+K search.
 
 **What changes:**
-- New chat service (FastAPI, separate from main backend or integrated) with endpoints: `POST /chat/query`, `GET /chat/context-preview`.
-- Schema change: add `summary` column to `documents` table (20-50 word summary per doc, generated by agent).
-- Chat service uses tree-based scoping to reduce context (100K docs -> 5-20 relevant docs per query), sends summaries + query to LLM, returns recommendations and/or direct answers with citations.
-- Frontend: new `ChatSidebar` component with message history, scope selector (current tree position), doc chips showing context, and "add/remove from context" controls.
-- Three implementation phases: (1) summary-based MVP, (2) enhanced context control UI, (3) optional embedding-based semantic search for scale.
+
+A new chat service (FastAPI, separate from or integrated with the main backend) exposes two endpoints: `POST /chat/query` and `GET /chat/context-preview`. A schema change adds a `summary` column to the `documents` table holding a 20-50 word summary per doc, generated by the agent. The chat service uses tree-based scoping to narrow context (100K docs become 5-20 relevant docs per query), sends summaries plus the query to an LLM, and returns recommendations or direct answers with citations.
+
+On the frontend, a new `ChatSidebar` component provides message history, a scope selector tied to current tree position, doc chips showing context, and "add/remove from context" controls. The implementation rolls out in three phases: (1) summary-based MVP, (2) enhanced context control UI, (3) optional embedding-based semantic search for scale.
 
 **Key design decisions:**
-- Orthogonal architecture: chat service is standalone, calls existing backend APIs.
-- Summary-based approach works up to ~1000 docs per scope; tree-based filtering keeps scopes small.
-- LLM proxy through backend (never expose API keys to frontend).
-- Strict citation requirement to prevent hallucination.
+
+The chat service is architecturally orthogonal, calling existing backend APIs rather than sharing internal code. The summary-based approach works up to roughly 1000 docs per scope, and tree-based filtering keeps scopes small. The LLM is proxied through the backend so API keys are never exposed to the frontend. A strict citation requirement prevents hallucination.
 
 **Files touched:**
 - New: `backend/app/api/chat.py`, `backend/app/services/chat_service.py`
@@ -106,20 +96,19 @@ Add an AI-powered chat sidebar for navigating documentation, recommending releva
 
 ---
 
-## T19 — XSS Sanitization
+## T19 -- XSS Sanitization
 
 Sanitize rendered markdown to prevent stored XSS via document content.
 
-**Current state:** Markdown rendered client-side via `remark-gfm` and `rehype-raw`. React's default escaping provides baseline protection, but `rehype-raw` allows raw HTML in markdown, which could be exploited if an attacker injects content via the agent or API.
+**Current state:** Markdown is rendered client-side via `remark-gfm` and `rehype-raw`. React's default escaping provides baseline protection, but `rehype-raw` allows raw HTML in markdown. This could be exploited if an attacker injects content via the agent or API.
 
 **What changes:**
-- Add `rehype-sanitize` to the markdown renderer pipeline (`frontend/components/markdown/MarkdownRenderer.tsx`).
-- Use the default GitHub schema (allows safe HTML subset, strips scripts and event handlers).
-- No backend changes needed — this is a frontend rendering concern.
+
+Add `rehype-sanitize` to the markdown renderer pipeline in `frontend/components/markdown/MarkdownRenderer.tsx`. The default GitHub schema allows a safe HTML subset while stripping scripts and event handlers. No backend changes are needed since this is purely a frontend rendering concern.
 
 **Files touched:**
-- `frontend/components/markdown/MarkdownRenderer.tsx` — add `rehype-sanitize` plugin
-- `frontend/package.json` — add `rehype-sanitize` dependency
+- `frontend/components/markdown/MarkdownRenderer.tsx` -- add `rehype-sanitize` plugin
+- `frontend/package.json` -- add `rehype-sanitize` dependency
 
 **Dependencies:** None.
 
@@ -131,31 +120,21 @@ Sanitize rendered markdown to prevent stored XSS via document content.
 
 ---
 
-## T20 — Frontend Test Suite (DONE)
+## T20 -- Frontend Test Suite (DONE)
 
 Build test infrastructure for the frontend from zero.
 
-**Current state:** 72 frontend tests passing across 6 test files. Vitest + React Testing Library + jsdom configured. Covers API client, MarkdownRenderer, WikilinkPicker, DependencyGraph, and DocumentTree components. Also caught and fixed a real bug in `useTreeData` (error state not cleared on retry).
+**Current state:** 72 frontend tests pass across 6 test files. Vitest + React Testing Library + jsdom are configured. Coverage includes the API client, MarkdownRenderer, WikilinkPicker, DependencyGraph, and DocumentTree components. The effort also caught and fixed a real bug in `useTreeData` where error state was not cleared on retry.
 
 **What changes:**
-- Add vitest + React Testing Library + jsdom
-- Test critical components:
-  - `MarkdownRenderer` — table rendering, mermaid rendering, wikilink handling, XSS scenarios
-  - `DocumentTree` — navigation, selection, drag-drop (mocked)
-  - `SearchCommand` — search flow, keyboard navigation, filter state
-  - `WikiLink` — resolution, broken link styling
-- Test auth flows:
-  - `authStore` — login, logout, permission checks (`canRead`, `canEdit`)
-  - 401 redirect behavior
-- Test API client:
-  - Error handling, retry logic, token injection
-- CI integration: add frontend tests to GitHub Actions workflow
+
+Add vitest, React Testing Library, and jsdom. Test critical components: `MarkdownRenderer` (table rendering, mermaid rendering, wikilink handling, XSS scenarios), `DocumentTree` (navigation, selection, drag-drop with mocks), `SearchCommand` (search flow, keyboard navigation, filter state), and `WikiLink` (resolution, broken link styling). Test auth flows: `authStore` (login, logout, permission checks via `canRead` and `canEdit`) and 401 redirect behavior. Test the API client for error handling, retry logic, and token injection. Integrate with CI by adding frontend tests to the GitHub Actions workflow.
 
 **Files touched:**
 - New: `frontend/__tests__/` directory structure
 - New: `frontend/vitest.config.ts`, `frontend/vitest.setup.ts`
-- `frontend/package.json` — vitest, @testing-library/react, jsdom
-- `.github/workflows/test.yml` — add frontend test step
+- `frontend/package.json` -- vitest, @testing-library/react, jsdom
+- `.github/workflows/test.yml` -- add frontend test step
 
 **Dependencies:** None.
 
@@ -169,23 +148,18 @@ Build test infrastructure for the frontend from zero.
 
 ---
 
-## T21 — Fix Migration Numbering (CRITICAL)
+## T21 -- Fix Migration Numbering (CRITICAL)
 
 Resolve duplicate migration file numbering that can cause deployment failures.
 
-**Current state:** Two migration files share the `006` prefix:
-- `backend/migrations/006_add_indexes.sql`
-- `backend/migrations/006_add_fts5.sql`
-
-This causes non-deterministic ordering. On fresh deployments, one migration may run before the other unpredictably, or migration runners may fail entirely.
+**Current state:** Two migration files share the `006` prefix: `backend/migrations/006_add_indexes.sql` and `backend/migrations/006_add_fts5.sql`. This causes non-deterministic ordering. On fresh deployments, one migration may run before the other unpredictably, or the migration runner may fail entirely.
 
 **What changes:**
-- Rename `006_add_fts5.sql` to `010_add_fts5.sql` (after the highest existing number)
-- Verify no other numbering conflicts exist
-- Document migration ordering expectations
+
+Rename `006_add_fts5.sql` to `010_add_fts5.sql` (after the highest existing number), verify no other numbering conflicts exist, and document migration ordering expectations.
 
 **Files touched:**
-- Rename: `backend/migrations/006_add_fts5.sql` → `backend/migrations/010_add_fts5.sql`
+- Rename: `backend/migrations/006_add_fts5.sql` -> `backend/migrations/010_add_fts5.sql`
 
 **Dependencies:** None.
 
@@ -196,29 +170,21 @@ This causes non-deterministic ordering. On fresh deployments, one migration may 
 
 ---
 
-## T22 — Require Explicit Production Config (CRITICAL)
+## T22 -- Require Explicit Production Config (CRITICAL)
 
 Prevent insecure deployments by failing startup when security-critical configuration uses defaults.
 
-**Current state:** The application starts successfully with insecure defaults:
-- `jwt_secret_key = "dev-insecure-key-change-me"` — predictable, attackers can forge tokens
-- `auth_enabled = False` — anyone can read/write/delete without authentication
-- Startup warnings exist (T18) but don't prevent the insecure deployment
+**Current state:** The application starts successfully with insecure defaults. `jwt_secret_key` is set to `"dev-insecure-key-change-me"`, which is predictable and lets attackers forge tokens. `auth_enabled` defaults to `False`, meaning anyone can read, write, and delete without authentication. Startup warnings exist (T18) but do not prevent the insecure deployment.
 
 **What changes:**
-- Add `ENVIRONMENT` setting: `development`, `staging`, `production`
-- In `production` mode:
-  - Fail startup if `JWT_SECRET_KEY` equals the default value
-  - Fail startup if `AUTH_ENABLED` is False
-  - Fail startup if `CORS_ALLOWED_ORIGINS` contains localhost
-- In `development` mode: warn but allow (current behavior)
-- Update docker-compose.yml to set `ENVIRONMENT=production` by default
+
+Add an `ENVIRONMENT` setting with values `development`, `staging`, and `production`. In production mode, startup fails if `JWT_SECRET_KEY` equals the default value, if `AUTH_ENABLED` is False, or if `CORS_ALLOWED_ORIGINS` contains localhost. In development mode, the application warns but allows these settings (current behavior). Update docker-compose.yml to set `ENVIRONMENT=production` by default.
 
 **Files touched:**
-- `backend/app/core/config.py` — add ENVIRONMENT setting, startup validation
-- `backend/app/main.py` — call validation in startup event
-- `docker-compose.yml` — set ENVIRONMENT=production
-- `.env.example` — document ENVIRONMENT variable
+- `backend/app/core/config.py` -- add ENVIRONMENT setting, startup validation
+- `backend/app/main.py` -- call validation in startup event
+- `docker-compose.yml` -- set ENVIRONMENT=production
+- `.env.example` -- document ENVIRONMENT variable
 
 **Dependencies:** None.
 
@@ -230,29 +196,21 @@ Prevent insecure deployments by failing startup when security-critical configura
 
 ---
 
-## T23 — PostgreSQL Migration Path (HIGH)
+## T23 -- PostgreSQL Migration Path (HIGH)
 
 Document and support PostgreSQL for production deployments with concurrent users.
 
-**Current state:** SQLite is the only documented database. It has severe limitations:
-- Single writer at a time (concurrent writes queue or fail)
-- `check_same_thread=False` is a workaround, not a solution
-- No connection pooling
-- Risk of "database is locked" errors under load
-- Risk of corruption on unclean shutdown
+**Current state:** SQLite is the only documented database, and it has severe limitations. It allows only a single writer at a time (concurrent writes queue or fail). The `check_same_thread=False` setting is a workaround, not a solution. There is no connection pooling, there is risk of "database is locked" errors under load, and there is risk of corruption on unclean shutdown.
 
 **What changes:**
-- Add PostgreSQL service to docker-compose.yml (optional, commented out)
-- Document SQLite limitations in README/DEPLOYING_AT_YOUR_ORGANIZATION.md
-- Test all queries work on PostgreSQL (especially FTS5 → PostgreSQL full-text search)
-- Add connection pooling configuration for PostgreSQL
-- Update health check to verify database connectivity with actual query
+
+Add a PostgreSQL service to docker-compose.yml (optional, commented out). Document SQLite limitations in README/DEPLOYING_AT_YOUR_ORGANIZATION.md. Test all queries on PostgreSQL, especially converting FTS5 to PostgreSQL full-text search. Add connection pooling configuration for PostgreSQL. Update the health check to verify database connectivity with an actual query.
 
 **Files touched:**
-- `docker-compose.yml` — add PostgreSQL service (optional)
-- `backend/app/database.py` — PostgreSQL connection pooling
-- `docs/DEPLOYING_AT_YOUR_ORGANIZATION.md` — document database options and limitations
-- `backend/app/repositories/document_repository.py` — abstract FTS5 vs PostgreSQL FTS
+- `docker-compose.yml` -- add PostgreSQL service (optional)
+- `backend/app/database.py` -- PostgreSQL connection pooling
+- `docs/DEPLOYING_AT_YOUR_ORGANIZATION.md` -- document database options and limitations
+- `backend/app/repositories/document_repository.py` -- abstract FTS5 vs PostgreSQL FTS
 
 **Dependencies:** None.
 
@@ -265,7 +223,7 @@ Document and support PostgreSQL for production deployments with concurrent users
 
 ---
 
-## T24 — Break Circular Service Dependencies (HIGH)
+## T24 -- Break Circular Service Dependencies (HIGH)
 
 Eliminate implicit coupling between DocumentService and DependencyService.
 
@@ -282,16 +240,15 @@ class DocumentService:
 Both services can mutate versions. Callers of `DocumentService.update_document()` cannot predict that dependencies and potentially other documents' wikilinks will be modified.
 
 **What changes:**
-- Option A (Coordinator pattern): Create `DocumentCoordinator` that orchestrates both services
-- Option B (Event pattern): DocumentService emits events, DependencyService subscribes
-- Option C (Explicit composition): API layer explicitly calls both services in sequence
 
-Recommended: Option C for simplicity — move orchestration to API layer where transaction boundaries are clearer.
+Three options exist. Option A (Coordinator pattern) creates a `DocumentCoordinator` that orchestrates both services. Option B (Event pattern) has DocumentService emit events that DependencyService subscribes to. Option C (Explicit composition) has the API layer explicitly call both services in sequence.
+
+Recommended: Option C for simplicity, moving orchestration to the API layer where transaction boundaries are clearer.
 
 **Files touched:**
-- `backend/app/services/document_service.py` — remove DependencyService instantiation
-- `backend/app/api/documents.py` — explicitly call both services
-- `backend/app/services/dependency_service.py` — no changes needed
+- `backend/app/services/document_service.py` -- remove DependencyService instantiation
+- `backend/app/api/documents.py` -- explicitly call both services
+- `backend/app/services/dependency_service.py` -- no changes needed
 
 **Dependencies:** None.
 
@@ -304,28 +261,21 @@ Recommended: Option C for simplicity — move orchestration to API layer where t
 
 ---
 
-## T25 — Standardize Service Return Types (HIGH)
+## T25 -- Standardize Service Return Types (HIGH)
 
 Eliminate return type inconsistency across services.
 
-**Current state:** Services return a mix of:
-- ORM models (`Document`, `User`)
-- Pydantic schemas (`DocumentListResponse`, `TreeNode`)
-- Raw dicts (`search_documents()` returns `list[dict]`)
-
-Callers must know which layer does type conversion. This creates maintenance burden and type safety gaps.
+**Current state:** Services return a mix of ORM models (`Document`, `User`), Pydantic schemas (`DocumentListResponse`, `TreeNode`), and raw dicts (`search_documents()` returns `list[dict]`). Callers must know which layer does type conversion, creating maintenance burden and type safety gaps.
 
 **What changes:**
-- All public service methods return Pydantic schemas (DTOs)
-- Private helper methods may use ORM models internally
-- `search_documents()` returns `list[SearchResultResponse]`, not `list[dict]`
-- Update all callers to use schema types
+
+All public service methods return Pydantic schemas (DTOs). Private helper methods may use ORM models internally. `search_documents()` returns `list[SearchResultResponse]` instead of `list[dict]`. All callers are updated to use schema types.
 
 **Files touched:**
-- `backend/app/services/document_service.py` — return schemas from all public methods
-- `backend/app/services/folder_service.py` — return schemas
-- `backend/app/schemas/document.py` — ensure all response types exist
-- `backend/app/api/*.py` — update type hints
+- `backend/app/services/document_service.py` -- return schemas from all public methods
+- `backend/app/services/folder_service.py` -- return schemas
+- `backend/app/schemas/document.py` -- ensure all response types exist
+- `backend/app/api/*.py` -- update type hints
 
 **Dependencies:** None.
 
@@ -337,7 +287,7 @@ Callers must know which layer does type conversion. This creates maintenance bur
 
 ---
 
-## T26 — Repository Exception Pattern (MEDIUM)
+## T26 -- Repository Exception Pattern (MEDIUM)
 
 Make repositories raise exceptions instead of returning None/False.
 
@@ -347,19 +297,17 @@ def get_by_id(self, doc_id: str) -> Optional[Document]:
     return self._active_query().filter(...).first()  # Returns None if not found
 ```
 
-Services must defensively check every return value and re-raise as custom exceptions. This is boilerplate that will be forgotten.
+Services must defensively check every return value and re-raise as custom exceptions. This is boilerplate that will inevitably be forgotten.
 
 **What changes:**
-- Repositories raise `DocumentNotFoundError`, `VersionNotFoundError`, etc.
-- Add `get_by_id_optional()` for cases where None is legitimate
-- Remove defensive checks from services
-- Update exception hierarchy if needed
+
+Repositories raise `DocumentNotFoundError`, `VersionNotFoundError`, and similar typed exceptions. A `get_by_id_optional()` method is added for cases where None is legitimate. Defensive checks are removed from services, and the exception hierarchy is updated if needed.
 
 **Files touched:**
-- `backend/app/repositories/document_repository.py` — raise on not found
-- `backend/app/repositories/version_repository.py` — raise on not found
-- `backend/app/repositories/dependency_repository.py` — raise on not found
-- `backend/app/services/*.py` — remove defensive None checks
+- `backend/app/repositories/document_repository.py` -- raise on not found
+- `backend/app/repositories/version_repository.py` -- raise on not found
+- `backend/app/repositories/dependency_repository.py` -- raise on not found
+- `backend/app/services/*.py` -- remove defensive None checks
 
 **Dependencies:** None.
 
@@ -371,21 +319,18 @@ Services must defensively check every return value and re-raise as custom except
 
 ---
 
-## T27 — Split DocumentTree Component (DONE)
+## T27 -- Split DocumentTree Component (DONE)
 
 Break the 676-line monolithic component into testable pieces.
 
-**Current state:** Component reduced from 676 → 471 lines. Three hooks extracted: `useTreeData` (data loading, refresh, generation status), `useTreeDragDrop` (drag state, drop handlers, validation), `useTreeSelection` (multi-select with Ctrl/Cmd+click). Zero TypeScript errors, all behavior preserved.
+**Current state:** The component was reduced from 676 to 471 lines. Three hooks were extracted: `useTreeData` (data loading, refresh, generation status), `useTreeDragDrop` (drag state, drop handlers, validation), and `useTreeSelection` (multi-select with Ctrl/Cmd+click). Zero TypeScript errors, all behavior preserved.
 
 **What changes:**
-- Extract `useTreeData` hook — data loading, refresh, optimistic updates
-- Extract `useTreeDragDrop` hook — drag state, drop handlers, validation
-- Extract `useTreeSelection` hook — multi-select state, Ctrl/Cmd+click logic
-- Extract `TreeContextMenu` component — context menu rendering and actions
-- Keep `DocumentTree` as thin orchestrator composing these pieces
+
+Extract `useTreeData` for data loading, refresh, and optimistic updates. Extract `useTreeDragDrop` for drag state, drop handlers, and validation. Extract `useTreeSelection` for multi-select state and Ctrl/Cmd+click logic. Extract a `TreeContextMenu` component for context menu rendering and actions. Keep `DocumentTree` as a thin orchestrator composing these pieces.
 
 **Files touched:**
-- `frontend/components/tree/DocumentTree.tsx` — reduce to ~200 lines
+- `frontend/components/tree/DocumentTree.tsx` -- reduce to ~200 lines
 - New: `frontend/hooks/useTreeData.ts`
 - New: `frontend/hooks/useTreeDragDrop.ts`
 - New: `frontend/hooks/useTreeSelection.ts`
@@ -401,28 +346,20 @@ Break the 676-line monolithic component into testable pieces.
 
 ---
 
-## T28 — Add Migration Runner (MEDIUM)
+## T28 -- Add Migration Runner (MEDIUM)
 
 Replace raw SQL files with proper migration management.
 
-**Current state:** Migrations are raw `.sql` files with no:
-- Version tracking (which migrations have been applied?)
-- Automatic execution on startup
-- Rollback automation
-- Dependency ordering enforcement
-
-Deployments require manually running SQL files in order.
+**Current state:** Migrations are raw `.sql` files with no version tracking (which migrations have been applied?), no automatic execution on startup, no rollback automation, and no dependency ordering enforcement. Deployments require manually running SQL files in order.
 
 **What changes:**
-- Add Alembic for SQLAlchemy migration management
-- Convert existing SQL files to Alembic migrations
-- Add `alembic upgrade head` to startup or entrypoint
-- Track migration state in `alembic_version` table
+
+Add Alembic for SQLAlchemy migration management. Convert existing SQL files to Alembic migrations. Add `alembic upgrade head` to startup or the entrypoint. Track migration state in the `alembic_version` table.
 
 **Files touched:**
 - New: `backend/alembic/` directory structure
 - New: `backend/alembic.ini`
-- `backend/app/main.py` or `Dockerfile` — run migrations on startup
+- `backend/app/main.py` or `Dockerfile` -- run migrations on startup
 - Keep `backend/migrations/*.sql` as reference (or convert to Alembic)
 
 **Dependencies:** T21 (fix numbering) should be done first.
@@ -435,23 +372,21 @@ Deployments require manually running SQL files in order.
 
 ---
 
-## T29 — Audit Log Retention (LOW)
+## T29 -- Audit Log Retention (LOW)
 
 Prevent unbounded growth of the audit_log table.
 
-**Current state:** `audit_log` table has no retention policy. Every state-changing operation adds a row. Over years, this will grow to millions of rows, slowing queries and consuming storage.
+**Current state:** The `audit_log` table has no retention policy. Every state-changing operation adds a row. Over years this will grow to millions of rows, slowing queries and consuming storage.
 
 **What changes:**
-- Add retention policy: delete audit entries older than 1 year (configurable)
-- Add startup purge job (similar to trash purge in `main.py`)
-- Add `created_at` index if not present
-- Document retention policy in DEPLOYING_AT_YOUR_ORGANIZATION.md
+
+Add a retention policy that deletes audit entries older than 1 year (configurable). Add a startup purge job similar to the trash purge in `main.py`. Add a `created_at` index if not already present. Document the retention policy in DEPLOYING_AT_YOUR_ORGANIZATION.md.
 
 **Files touched:**
-- `backend/app/services/audit_service.py` — add `purge_old_entries(days=365)`
-- `backend/app/main.py` — call purge on startup
-- `backend/app/core/config.py` — add `AUDIT_RETENTION_DAYS` setting
-- `docs/DEPLOYING_AT_YOUR_ORGANIZATION.md` — document retention
+- `backend/app/services/audit_service.py` -- add `purge_old_entries(days=365)`
+- `backend/app/main.py` -- call purge on startup
+- `backend/app/core/config.py` -- add `AUDIT_RETENTION_DAYS` setting
+- `docs/DEPLOYING_AT_YOUR_ORGANIZATION.md` -- document retention
 
 **Dependencies:** None.
 
@@ -463,23 +398,20 @@ Prevent unbounded growth of the audit_log table.
 
 ---
 
-## T30 — Database Backup Strategy (LOW)
+## T30 -- Database Backup Strategy (LOW)
 
 Document and automate database backups.
 
-**Current state:** No backup strategy documented. SQLite file could be lost on disk failure. No point-in-time recovery possible.
+**Current state:** No backup strategy is documented. The SQLite file could be lost on disk failure, and no point-in-time recovery is possible.
 
 **What changes:**
-- Document manual backup commands for SQLite and PostgreSQL
-- Add backup script to docker-compose (optional cron service)
-- Document restore procedure
-- For SQLite: simple file copy while app is stopped, or `.backup` command
-- For PostgreSQL: `pg_dump` with compression
+
+Document manual backup commands for SQLite and PostgreSQL. Add a backup script to docker-compose (optional cron service). Document the restore procedure. For SQLite, use a simple file copy while the app is stopped or the `.backup` command. For PostgreSQL, use `pg_dump` with compression.
 
 **Files touched:**
-- `docs/DEPLOYING_AT_YOUR_ORGANIZATION.md` — backup and restore procedures
-- New: `scripts/backup.sh` — backup script
-- `docker-compose.yml` — optional backup service (cron-based)
+- `docs/DEPLOYING_AT_YOUR_ORGANIZATION.md` -- backup and restore procedures
+- New: `scripts/backup.sh` -- backup script
+- `docker-compose.yml` -- optional backup service (cron-based)
 
 **Dependencies:** T23 (PostgreSQL support) for PostgreSQL backup docs.
 
@@ -510,39 +442,34 @@ T29 (Audit Log Retention)       T30 (Database Backup)
 
 T20 (Frontend Tests)            T27 (Split DocumentTree)
 
-OPEN — MEDIUM:
-T4  (Content Migration)         — standalone, better with T3
-T28 (Migration Runner)          — after T21
+OPEN -- MEDIUM:
+T4  (Content Migration)         -- standalone, better with T3
+T28 (Migration Runner)          -- after T21
 
-OPEN — LOW:
-T12 (Monitoring Dashboard)      — standalone
-T16 (AI Chat Assistant)         — standalone, better with T7
-T31 (Sample Data / Seed Script) — standalone
+OPEN -- LOW:
+T12 (Monitoring Dashboard)      -- standalone
+T16 (AI Chat Assistant)         -- standalone, better with T7
+T31 (Sample Data / Seed Script) -- standalone
 ```
 
 No task blocks another. All are independently shippable. "Better with/after" indicates synergy, not hard dependency.
 
 ---
 
-## T31 — Sample Data / Seed Script (LOW)
+## T31 -- Sample Data / Seed Script (LOW)
 
 Provide sample data for fresh deployments so new users and evaluators can explore the product immediately.
 
 **Current state:** A fresh install is completely empty. The first user must be created via `curl`, and all documents must be generated or manually created. This makes initial evaluation harder than it should be.
 
 **What changes:**
-- Create `scripts/seed.py` that populates a fresh database with:
-  - An admin user (with a documented default password)
-  - A small folder hierarchy (3-5 folders)
-  - 5-10 sample documents with realistic markdown content, wikilinks, and metadata
-  - A few dependency relationships between documents
-- The script should be idempotent (safe to run multiple times)
-- Clearly documented as development/demo only — never run in production
+
+Create `scripts/seed.py` to populate a fresh database with an admin user (with a documented default password), a small folder hierarchy (3-5 folders), 5-10 sample documents with realistic markdown content, wikilinks, and metadata, plus a few dependency relationships between documents. The script should be idempotent (safe to run multiple times) and clearly documented as development/demo only, never to be run in production.
 
 **Files touched:**
 - New: `scripts/seed.py`
-- `README.md` — mention seed script in quick start
-- `docs/DEPLOYING_AT_YOUR_ORGANIZATION.md` — mention availability for evaluation
+- `README.md` -- mention seed script in quick start
+- `docs/DEPLOYING_AT_YOUR_ORGANIZATION.md` -- mention availability for evaluation
 
 **Dependencies:** None.
 
@@ -555,15 +482,11 @@ Provide sample data for fresh deployments so new users and evaluators can explor
 
 ---
 
-## T32 — Content Chunk Embeddings for Paragraph-Level RAG (MEDIUM)
+## T32 -- Content Chunk Embeddings for Paragraph-Level RAG (MEDIUM)
 
-**Current state:** The system supports description-level embeddings — one vector per
-document based on its 2-3 sentence summary. This is good for document discovery
-("find documents about authentication") but not for paragraph-level retrieval
-("what's the exact configuration syntax for JWT tokens?").
+**Current state:** The system supports description-level embeddings, one vector per document based on its 2-3 sentence summary. This works well for document discovery ("find documents about authentication") but not for paragraph-level retrieval ("what's the exact configuration syntax for JWT tokens?").
 
-**Goal:** Add content chunk embeddings so that individual paragraphs/sections within
-a document can be retrieved via semantic search, enabling RAG-quality retrieval.
+**Goal:** Add content chunk embeddings so individual paragraphs and sections within a document can be retrieved via semantic search, enabling RAG-quality retrieval.
 
 **Architecture:**
 
@@ -584,15 +507,12 @@ CREATE INDEX idx_chunks_embedding ON document_chunks
 ```
 
 **Chunking strategy:**
-- Split documents by heading (## boundaries)
-- Each chunk ~300-500 tokens with overlap
-- Store chunk position for context reconstruction
-- Re-chunk on document update (delete old chunks, create new ones)
+
+Documents are split by heading (## boundaries), with each chunk targeting 300-500 tokens and some overlap. Chunk position is stored for context reconstruction. On document update, old chunks are deleted and new ones are created.
 
 **Re-ranking:**
-- Initial retrieval: top-50 chunks via vector search
-- Re-rank with cross-encoder model for precision
-- Return top-5 chunks with document context
+
+Initial retrieval pulls the top 50 chunks via vector search. A cross-encoder model re-ranks them for precision, and the top 5 chunks are returned with document context.
 
 **Acceptance criteria:**
 - [ ] `document_chunks` table with vector column (PostgreSQL only)
@@ -608,23 +528,23 @@ CREATE INDEX idx_chunks_embedding ON document_chunks
 ## Priority Order for "Deploy and Forget" Robustness
 
 **Pre-production (DONE):**
-1. ~~T21 — Fix Migration Numbering~~ ✓
-2. ~~T22 — Require Explicit Production Config~~ ✓
-3. ~~T19 — XSS Sanitization~~ ✓
-4. ~~T23 — PostgreSQL Migration Path~~ ✓
+1. ~~T21 -- Fix Migration Numbering~~ ✓
+2. ~~T22 -- Require Explicit Production Config~~ ✓
+3. ~~T19 -- XSS Sanitization~~ ✓
+4. ~~T23 -- PostgreSQL Migration Path~~ ✓
 
 **Post-deployment hardening (DONE):**
-5. ~~T24 — Break Circular Service Dependencies~~ ✓
-6. ~~T25 — Standardize Service Return Types~~ ✓
+5. ~~T24 -- Break Circular Service Dependencies~~ ✓
+6. ~~T25 -- Standardize Service Return Types~~ ✓
 
-**Testing & refactoring (DONE):**
-7. ~~T20 — Frontend Test Suite~~ ✓ (72 tests across 6 files)
-8. ~~T26 — Repository exception pattern~~ ✓
-9. ~~T27 — Split DocumentTree~~ ✓ (676 → 471 lines)
-10. ~~T29 — Audit log retention~~ ✓
-11. ~~T30 — Database backup script~~ ✓
+**Testing and refactoring (DONE):**
+7. ~~T20 -- Frontend Test Suite~~ ✓ (72 tests across 6 files)
+8. ~~T26 -- Repository exception pattern~~ ✓
+9. ~~T27 -- Split DocumentTree~~ ✓ (676 -> 471 lines)
+10. ~~T29 -- Audit log retention~~ ✓
+11. ~~T30 -- Database backup script~~ ✓
 
 **Remaining:**
-12. T28 — Migration runner (low priority — manual migrations work)
-13. T4, T12, T16, T31 — Feature additions
-14. T32 — Content chunk embeddings (builds on description-level embeddings)
+12. T28 -- Migration runner (low priority, manual migrations work)
+13. T4, T12, T16, T31 -- Feature additions
+14. T32 -- Content chunk embeddings (builds on description-level embeddings)

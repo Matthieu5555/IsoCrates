@@ -6,21 +6,21 @@ All notable changes to the IsoCrates project are documented here.
 
 ## [2.4.0] - 2026-02-06 - Permission Enforcement Audit & Security Hardening
 
-This release is a comprehensive security audit that brings every API endpoint into consistent permission enforcement. Before this change, unauthenticated requests with `AUTH_ENABLED=true` could bypass permission checks on read endpoints because `optional_auth` returned `None` when no token was present, and downstream code treated `None` as "no filtering required." The result was that anonymous callers saw all documents — the opposite of the intended behavior.
+A comprehensive security audit that brings every API endpoint into consistent permission enforcement. Previously, unauthenticated requests with `AUTH_ENABLED=true` could bypass permission checks on read endpoints because `optional_auth` returned `None` when no token was present, and downstream code treated `None` as "no filtering required." Anonymous callers could see all documents, the opposite of the intended behavior.
 
 ### Security
 
-The root cause was that `optional_auth` returned `None` when no valid token was provided, and `_prefixes_from_auth()` interpreted `None` as `allowed_prefixes=None`, which SQL queries treated as "skip permission filtering entirely." The fix changes `optional_auth` to always return an `AuthContext` — when auth is enabled but no valid token is present, it returns a special `_UNAUTHENTICATED` context with empty grants. Because every permission check requires at least one matching grant to allow access, empty grants deny everything by default. This single change closes the bypass for all endpoints that use `optional_auth`.
+The root cause: `optional_auth` returned `None` when no valid token was provided, and `_prefixes_from_auth()` interpreted `None` as `allowed_prefixes=None`, which SQL queries treated as "skip permission filtering entirely." The fix changes `optional_auth` to always return an `AuthContext`. When auth is enabled but no valid token is present, it returns a special `_UNAUTHENTICATED` context with empty grants. Because every permission check requires at least one matching grant to allow access, empty grants deny everything by default. This single change closes the bypass for all endpoints using `optional_auth`.
 
 Beyond the core fix, eleven endpoints that lacked proper authentication were hardened. The versions API (`GET /versions`, `GET /versions/latest`, `GET /versions/{id}`) now requires document-level read access, so version history is no longer visible without a grant for the parent document. The dependencies API (`GET /dependencies` for both per-document and global graph) now filters results by the caller's grants. The jobs API (`GET /jobs`, `GET /jobs/{id}`) now requires optional auth. The folders API (`GET /folders/metadata`, `GET /folders/metadata/{id}`) now filters by path grants. The dependencies reindex endpoint (`POST /dependencies/reindex`) was elevated from `require_auth` to `require_admin` since it triggers a potentially expensive operation across all documents.
 
 Personal tree endpoints received isolation enforcement: all personal tree operations now validate ownership against `auth.user_id`, preventing users from accessing another user's personal folders or document references. The `GET /personal/tree` endpoint was changed from `optional_auth` to `require_auth` because a personal tree is meaningless without an authenticated identity.
 
-Webhook hardening ensures that `POST /webhooks/github` now rejects unsigned payloads when `AUTH_ENABLED=true`, returning a 500 with a clear error message. Previously the endpoint merely logged a warning and proceeded, which meant an attacker could trigger arbitrary documentation regeneration without knowing the webhook secret.
+Webhook hardening ensures that `POST /webhooks/github` now rejects unsigned payloads when `AUTH_ENABLED=true`, returning a 500 with a clear error message. Previously the endpoint merely logged a warning and proceeded, meaning an attacker could trigger arbitrary documentation regeneration without knowing the webhook secret.
 
 ### Fixed
 
-Three additional permission bypasses were corrected. The delete/restore permission asymmetry meant that restoring a trashed document required only "edit" permission while trashing it required "delete" — now restore also requires "delete" permission, so the same user who can trash a document can also restore it. The `batch-titles` endpoint had a short-circuit evaluation bug where `if auth is None or check_permission(...)` always returned `True` for unauthenticated callers because the `None` check short-circuited before the permission check ran; removing the `None` check forces the permission evaluation. Similarly, the `resolve-wikilink` endpoint guarded its permission check with `if auth is not None`, which allowed unauthenticated resolution; the guard was removed.
+Three additional permission bypasses were corrected. The delete/restore permission asymmetry meant that restoring a trashed document required only "edit" permission while trashing required "delete." Now restore also requires "delete" permission, so the same privilege governs both directions. The `batch-titles` endpoint had a short-circuit bug where `if auth is None or check_permission(...)` always returned `True` for unauthenticated callers because the `None` check short-circuited before the permission check ran; removing the `None` check forces the permission evaluation. Similarly, the `resolve-wikilink` endpoint guarded its permission check with `if auth is not None`, which allowed unauthenticated resolution; the guard was removed.
 
 ### Changed
 
@@ -30,19 +30,19 @@ The `optional_auth` return type changed from `Optional[AuthContext]` to `AuthCon
 
 ## [2.3.0] - 2026-02-05 - Description Embeddings & Semantic Search
 
-This release adds a document description field with vector embeddings, enabling semantic search alongside the existing full-text search. The two systems complement each other: full-text search finds exact terminology, while semantic search finds conceptually related documents even when the wording differs. Results are merged through Reciprocal Rank Fusion, so users get the best of both approaches in a single query.
+Adds a document description field with vector embeddings, enabling semantic search alongside existing full-text search. The two systems complement each other: full-text search finds exact terminology, while semantic search finds conceptually related documents even when wording differs. Results are merged through Reciprocal Rank Fusion, giving users the best of both approaches in a single query.
 
 ### Added
 
-Every document now carries a `description` column — a 2-3 sentence summary generated by the agent or written by human editors. These descriptions serve double duty: they appear in the UI as a quick synopsis below the document title, and they are embedded as vectors for similarity search. Embeddings are generated via LiteLLM, which means the embedding provider is configurable through the `EMBEDDING_MODEL` environment variable — OpenAI, Cohere, Ollama, and any OpenAI-compatible endpoint are supported. On PostgreSQL, vectors are stored using the pgvector extension for efficient nearest-neighbor queries; on SQLite, the system falls back to in-memory cosine similarity, which works for small deployments but does not scale.
+Every document now carries a `description` column, a 2-3 sentence summary generated by the agent or written by human editors. Descriptions serve double duty: they appear in the UI as a quick synopsis below the document title, and they are embedded as vectors for similarity search. Embeddings are generated via LiteLLM, so the embedding provider is configurable through the `EMBEDDING_MODEL` environment variable (OpenAI, Cohere, Ollama, and any OpenAI-compatible endpoint are supported). On PostgreSQL, vectors are stored using the pgvector extension for efficient nearest-neighbor queries. On SQLite, the system falls back to in-memory cosine similarity, which works for small deployments but does not scale.
 
-Three new API endpoints expose the semantic search capability. `GET /api/docs/similar/?text=...` finds documents whose descriptions are semantically close to arbitrary text, which is useful for discovery when a user knows what they need but not what it's called. `GET /api/docs/{doc_id}/similar` finds documents related to an existing document, enabling "related pages" features. `POST /api/docs/reindex` triggers a full re-embedding of all documents with descriptions and is restricted to admins since it makes potentially expensive API calls.
+Three new API endpoints expose semantic search. `GET /api/docs/similar/?text=...` finds documents whose descriptions are semantically close to arbitrary text, useful for discovery when a user knows what they need but not what it is called. `GET /api/docs/{doc_id}/similar` finds documents related to an existing document, enabling "related pages" features. `POST /api/docs/reindex` triggers a full re-embedding of all documents with descriptions and is restricted to admins since it makes potentially expensive API calls.
 
-The MCP server gained a `find_similar_docs` tool, which means AI coding assistants like Claude Code can query the documentation library for semantically related pages during a coding session. All MCP formatters were updated to include document descriptions in their output, giving the assistant richer context.
+The MCP server gained a `find_similar_docs` tool, allowing AI coding assistants like Claude Code to query the documentation library for semantically related pages during a coding session. All MCP formatters were updated to include document descriptions in their output, giving the assistant richer context.
 
-On the frontend, descriptions appear as italic blockquotes below each document's title in the document view. The search results now prefer showing the description over a content snippet when a description is available, since descriptions are written specifically to summarize the document. The metadata details panel includes a "Search Index" indicator (green dot for indexed, gray for pending) so editors can see at a glance whether a document's embedding is current.
+On the frontend, descriptions appear as italic blockquotes below each document's title. Search results now prefer showing the description over a content snippet when one is available, since descriptions are written specifically to summarize the document. The metadata details panel includes a "Search Index" indicator (green dot for indexed, gray for pending) so editors can see at a glance whether a document's embedding is current.
 
-The agent's planner prompt now instructs the writer to produce a description for every generated document, and the fallback `core_pages` include default descriptions for the standard page types. The API payload was extended to carry the description field through the entire pipeline.
+The agent's planner prompt now instructs the writer to produce a description for every generated document, and the fallback `core_pages` include default descriptions for the standard page types. The API payload carries the description field through the entire pipeline.
 
 ### Changed
 
@@ -56,44 +56,20 @@ Six platform concerns implemented as one cohesive pass sharing config, middlewar
 
 ### Added
 
-**JWT Authentication**
-- Hand-rolled HMAC-SHA256 JWT implementation (no external dependencies) in `backend/app/core/token_factory.py`
-- `require_auth` and `optional_auth` FastAPI dependencies in `backend/app/core/auth.py`
-- Auth disabled by default (`AUTH_ENABLED=false`) -- dev workflow unbroken
-- Write endpoints (POST/PUT/DELETE) require auth when enabled; read endpoints use optional auth
-- Anonymous payload returned in dev mode instead of raising errors
+**JWT Authentication.** Hand-rolled HMAC-SHA256 JWT implementation (no external dependencies) in `backend/app/core/token_factory.py`. `require_auth` and `optional_auth` FastAPI dependencies live in `backend/app/core/auth.py`. Auth is disabled by default (`AUTH_ENABLED=false`), leaving the dev workflow unbroken. Write endpoints (POST/PUT/DELETE) require auth when enabled; read endpoints use optional auth. An anonymous payload is returned in dev mode instead of raising errors.
 
-**Rate Limiting**
-- Token bucket rate limiter as a pure function (`check_rate_limit`) in `backend/app/middleware/request_context.py`
-- 60 requests/minute/client default, configurable via `RATE_LIMIT_PER_MINUTE`
-- Returns 429 with `Retry-After` header and structured JSON error body
-- Health, docs, and OpenAPI paths exempt from rate limiting
+**Rate Limiting.** Token bucket rate limiter as a pure function (`check_rate_limit`) in `backend/app/middleware/request_context.py`. Default is 60 requests/minute/client, configurable via `RATE_LIMIT_PER_MINUTE`. Returns 429 with `Retry-After` header and structured JSON error body. Health, docs, and OpenAPI paths are exempt.
 
-**Request Context Middleware**
-- Single deep middleware handling request-id, timing, structured logging, and rate limiting
-- Every response includes `X-Request-ID` and `X-Response-Time` headers
-- Structured JSON request log: method, path, status, duration_ms, request_id
+**Request Context Middleware.** A single middleware handles request-id, timing, structured logging, and rate limiting. Every response includes `X-Request-ID` and `X-Response-Time` headers. Structured JSON request logs contain method, path, status, duration_ms, and request_id.
 
-**Structured Logging**
-- JSON formatter with `contextvars.ContextVar` for request_id propagation
-- All log entries include timestamp, level, logger, message, request_id, and extra fields
-- Text mode available for local dev readability (`LOG_FORMAT=text`)
+**Structured Logging.** JSON formatter with `contextvars.ContextVar` for request_id propagation. All log entries include timestamp, level, logger, message, request_id, and extra fields. Text mode is available for local dev readability (`LOG_FORMAT=text`).
 
-**Database Indexes**
-- Indexes on `documents.path`, `documents.updated_at`, `documents.repo_url`
-- Indexes on `versions.doc_id`, `versions.created_at`
-- Indexes on `dependencies.from_doc_id`, `dependencies.to_doc_id`, unique composite `(from_doc_id, to_doc_id)`
-- Personal model indexes on `user_id`, `parent_id`, `(user_id, folder_id)`, `document_id`
-- Idempotent migration: `backend/migrations/006_add_indexes.sql`
+**Database Indexes.** Indexes on `documents.path`, `documents.updated_at`, `documents.repo_url`; on `versions.doc_id`, `versions.created_at`; on `dependencies.from_doc_id`, `dependencies.to_doc_id` with a unique composite `(from_doc_id, to_doc_id)`; and personal model indexes on `user_id`, `parent_id`, `(user_id, folder_id)`, `document_id`. Idempotent migration: `backend/migrations/006_add_indexes.sql`.
 
-**OpenAPI Enrichment**
-- API metadata (description, license, contact) in FastAPI constructor
-- `summary`, `description`, and `responses` on all route decorators
-- Example request bodies in Pydantic schemas (`DocumentCreate`)
-- HTTPBearer security scheme in Swagger UI
+**OpenAPI Enrichment.** API metadata (description, license, contact) in the FastAPI constructor. `summary`, `description`, and `responses` on all route decorators. Example request bodies in Pydantic schemas (`DocumentCreate`). HTTPBearer security scheme in Swagger UI.
 
-**Test Suite (34 tests)**
-- In-memory SQLite test fixtures with per-test rollback (`backend/tests/conftest.py`)
+**Test Suite (34 tests).** In-memory SQLite test fixtures with per-test rollback (`backend/tests/conftest.py`).
+
 - `test_documents_api.py` -- CRUD lifecycle, upsert idempotency, search (8 tests)
 - `test_versions_api.py` -- version creation, latest version, empty list (3 tests)
 - `test_dependencies_api.py` -- wikilink extraction, self-link rejection (3 tests)
@@ -102,18 +78,15 @@ Six platform concerns implemented as one cohesive pass sharing config, middlewar
 - `test_rate_limit.py` -- pure function: within limit, exhaustion, refill, independent keys, zero limit (5 tests)
 - `test_health.py` -- health fields, root endpoint, response headers (4 tests)
 
-**Expanded Health Endpoint**
-- `/health` now returns `{status, db, uptime_seconds, version, document_count}`
-- Never raises -- returns `"db": "error"` on database failure
+**Expanded Health Endpoint.** `/health` now returns `{status, db, uptime_seconds, version, document_count}`. It never raises; on database failure it returns `"db": "error"`.
 
 ### Changed
-- Agent `api_client.py` rewritten: auth headers via `DOC_API_TOKEN` env var, `print()` replaced with structured logging
-- Frontend `client.ts`: auth headers via env var or localStorage, 401/429 user-friendly error messages
-- `docker-compose.yml`: added `JWT_SECRET_KEY`, `AUTH_ENABLED`, `LOG_FORMAT`, `DOC_API_TOKEN`, `NEXT_PUBLIC_API_TOKEN`
-- Config expanded: `jwt_secret_key`, `jwt_algorithm`, `auth_enabled`, `rate_limit_per_minute`, `log_format`
+
+The agent `api_client.py` was rewritten: auth headers via `DOC_API_TOKEN` env var, `print()` replaced with structured logging. The frontend `client.ts` now sends auth headers via env var or localStorage and shows user-friendly error messages for 401/429 responses. `docker-compose.yml` gained `JWT_SECRET_KEY`, `AUTH_ENABLED`, `LOG_FORMAT`, `DOC_API_TOKEN`, and `NEXT_PUBLIC_API_TOKEN` variables. Config was expanded with `jwt_secret_key`, `jwt_algorithm`, `auth_enabled`, `rate_limit_per_minute`, and `log_format`.
 
 ### Fixed
-- FastAPI route ordering bug in `versions.py`: `/latest` now defined before `/{version_id}`
+
+FastAPI route ordering bug in `versions.py`: `/latest` is now defined before `/{version_id}`.
 
 ### Technical Details
 - **New Backend Files** (8):
@@ -142,100 +115,79 @@ Three tasks from `docs/FURTHER_DEVELOPMENT.md` implemented: T1, T2, T8.
 
 ### Added
 
-**T1 — Multi-Page Agent Orchestration**
-- Agent now generates 4-8 pages per audience instead of one monolithic file
-- New `_plan_document_tree()` method runs a lightweight agent conversation to analyze the repo and produce a JSON document tree (falls back to a sensible 4-page default)
-- `generate_all()` loops over the planned tree, calling `generate_documentation()` per page
-- Each page receives a sibling page list so it produces accurate `[[wikilinks]]` to related pages and avoids duplicating content
+**T1: Multi-Page Agent Orchestration.** The agent now generates 4-8 pages per audience instead of one monolithic file. A new `_plan_document_tree()` method runs a lightweight agent conversation to analyze the repo and produce a JSON document tree (falls back to a sensible 4-page default). `generate_all()` loops over the planned tree, calling `generate_documentation()` per page. Each page receives a sibling page list so it produces accurate `[[wikilinks]]` to related pages and avoids duplicating content.
 
-**T2 — Rich Content in Agent Prompts (Tables + Mermaid)**
-- Softdev prompt now requires at least 1 GFM table and 1 mermaid diagram per document, with examples for endpoint summaries, config tables, architecture diagrams, and data flow charts
-- Client prompt requires at least 1 GFM table but no mermaid (business audience)
-- Post-generation verification logs warnings when tables or mermaid blocks are missing
+**T2: Rich Content in Agent Prompts (Tables + Mermaid).** The softdev prompt now requires at least one GFM table and one Mermaid diagram per document, with examples for endpoint summaries, config tables, architecture diagrams, and data flow charts. The client prompt requires at least one GFM table but no Mermaid (business audience). Post-generation verification logs warnings when tables or Mermaid blocks are missing.
 
-**T8 — Automatic Regeneration Triggers**
-- `POST /api/webhooks/github` endpoint validates GitHub push webhook signatures (HMAC-SHA256) and enqueues regeneration jobs
-- `GET /api/jobs` and `GET /api/jobs/{job_id}` endpoints for querying job status
-- `GenerationJob` model tracks lifecycle: queued → running → completed/failed
-- Duplicate webhooks for the same commit SHA are deduplicated
-- Failed jobs are retried once automatically
-- Polling worker (`backend/worker.py`) claims queued jobs and runs the agent subprocess with 30-minute timeout
-- Frontend crate nodes show generation status icons (spinning for running, clock for queued, checkmark for completed, X for failed)
+**T8: Automatic Regeneration Triggers.** `POST /api/webhooks/github` validates GitHub push webhook signatures (HMAC-SHA256) and enqueues regeneration jobs. `GET /api/jobs` and `GET /api/jobs/{job_id}` expose job status. A `GenerationJob` model tracks lifecycle: queued, running, completed, or failed. Duplicate webhooks for the same commit SHA are deduplicated, and failed jobs are retried once automatically. A polling worker (`backend/worker.py`) claims queued jobs and runs the agent subprocess with a 30-minute timeout. Frontend crate nodes show generation status icons (spinning for running, clock for queued, checkmark for completed, X for failed).
 
 ### Technical Details
 - **New Backend Files** (5):
-  - `backend/app/models/generation_job.py` — Job model with status and retry tracking
-  - `backend/app/services/job_service.py` — Enqueue, claim, complete, fail, deduplicate
-  - `backend/app/api/webhooks.py` — GitHub webhook endpoint with HMAC verification
-  - `backend/app/api/jobs.py` — Job status query endpoints
-  - `backend/app/schemas/webhook.py` — Response schemas for webhooks and jobs
+  - `backend/app/models/generation_job.py` -- Job model with status and retry tracking
+  - `backend/app/services/job_service.py` -- Enqueue, claim, complete, fail, deduplicate
+  - `backend/app/api/webhooks.py` -- GitHub webhook endpoint with HMAC verification
+  - `backend/app/api/jobs.py` -- Job status query endpoints
+  - `backend/app/schemas/webhook.py` -- Response schemas for webhooks and jobs
 - **New Worker** (1):
-  - `backend/worker.py` — Polling worker (10s interval, 30min timeout per job)
+  - `backend/worker.py` -- Polling worker (10s interval, 30min timeout per job)
 - **Modified Agent Files** (1):
-  - `agent/openhands_doc.py` — T1 planning loop, T2 prompt enrichment, sibling page wikilinks, content verification
+  - `agent/openhands_doc.py` -- T1 planning loop, T2 prompt enrichment, sibling page wikilinks, content verification
 - **Modified Backend Files** (5):
-  - `backend/app/models/__init__.py` — Registered `GenerationJob`
-  - `backend/app/api/__init__.py` — Registered webhook and job routers
-  - `backend/app/main.py` — Included new routers
-  - `backend/app/core/config.py` — Added `github_webhook_secret`
-  - `backend/app/exceptions.py` — Added `WebhookValidationError`
+  - `backend/app/models/__init__.py` -- Registered `GenerationJob`
+  - `backend/app/api/__init__.py` -- Registered webhook and job routers
+  - `backend/app/main.py` -- Included new routers
+  - `backend/app/core/config.py` -- Added `github_webhook_secret`
+  - `backend/app/exceptions.py` -- Added `WebhookValidationError`
 - **Modified Infrastructure** (1):
-  - `docker-compose.yml` — `GITHUB_WEBHOOK_SECRET` env var, new `doc-worker` service
+  - `docker-compose.yml` -- `GITHUB_WEBHOOK_SECRET` env var, new `doc-worker` service
 - **Modified Frontend Files** (1):
-  - `frontend/components/tree/DocumentTree.tsx` — Generation status indicator on crate nodes
+  - `frontend/components/tree/DocumentTree.tsx` -- Generation status indicator on crate nodes
 
 ### New API Endpoints
-- `POST /api/webhooks/github` — Receive GitHub push events, enqueue regeneration
-- `GET /api/jobs` — List generation jobs (optional `?repo_url=` filter)
-- `GET /api/jobs/{job_id}` — Get specific job status
+- `POST /api/webhooks/github` -- Receive GitHub push events, enqueue regeneration
+- `GET /api/jobs` -- List generation jobs (optional `?repo_url=` filter)
+- `GET /api/jobs/{job_id}` -- Get specific job status
 
 ### Configuration
-- `GITHUB_WEBHOOK_SECRET` — Set in `.env` or Docker env to enable webhook signature verification. Leave empty to skip verification (development only).
+
+`GITHUB_WEBHOOK_SECRET` -- Set in `.env` or Docker env to enable webhook signature verification. Leave empty to skip verification (development only).
 
 ---
 
 ## [2.0.1] - 2026-01-31 - Portal Fix for Overlay Components
 
 ### Fixed
-- **Context menu and dialogs not responding to clicks** — All overlay components (ContextMenu, ConfirmDialog, DeleteFolderDialog, NewDocumentDialog, NewFolderDialog) were rendered inside the sidebar's `overflow-y-auto` container, causing them to be clipped or non-interactive. Migrated all overlays to use `ReactDOM.createPortal(…, document.body)` so they render at the document root, escaping any overflow/stacking context constraints.
-- Context menu z-index bumped to `z-[9999]` and viewport-clamped to prevent off-screen rendering.
+
+All overlay components (ContextMenu, ConfirmDialog, DeleteFolderDialog, NewDocumentDialog, NewFolderDialog) were rendered inside the sidebar's `overflow-y-auto` container, causing them to be clipped or non-interactive. Migrated all overlays to use `ReactDOM.createPortal(..., document.body)` so they render at the document root, escaping any overflow/stacking context constraints. Context menu z-index was bumped to `z-[9999]` and viewport-clamped to prevent off-screen rendering.
 
 ### Removed
-- Dead code: `deleteCrate()` helper in DocumentTree that individually deleted documents (superseded by the atomic `DELETE /api/crates/{crate}` endpoint).
-- Unreachable `folder` branch in `handleDeleteConfirm` (folders now route to `DeleteFolderDialog`).
+
+Dead code: `deleteCrate()` helper in DocumentTree that individually deleted documents (superseded by the atomic `DELETE /api/crates/{crate}` endpoint). Also removed the unreachable `folder` branch in `handleDeleteConfirm` (folders now route to `DeleteFolderDialog`).
 
 ### Technical Details
 - **Modified Frontend Files** (6):
-  - `frontend/components/tree/ContextMenu.tsx` — Portal + viewport clamping
-  - `frontend/components/tree/dialogs/ConfirmDialog.tsx` — Portal
-  - `frontend/components/tree/dialogs/DeleteFolderDialog.tsx` — Portal
-  - `frontend/components/tree/dialogs/NewDocumentDialog.tsx` — Portal
-  - `frontend/components/tree/dialogs/NewFolderDialog.tsx` — Portal
-  - `frontend/components/tree/DocumentTree.tsx` — Dead code removal
+  - `frontend/components/tree/ContextMenu.tsx` -- Portal + viewport clamping
+  - `frontend/components/tree/dialogs/ConfirmDialog.tsx` -- Portal
+  - `frontend/components/tree/dialogs/DeleteFolderDialog.tsx` -- Portal
+  - `frontend/components/tree/dialogs/NewDocumentDialog.tsx` -- Portal
+  - `frontend/components/tree/dialogs/NewFolderDialog.tsx` -- Portal
+  - `frontend/components/tree/DocumentTree.tsx` -- Dead code removal
 
 ---
 
 ## [2.0.0] - 2026-01-29 - Folder System Refactor
 
 ### Added
-- Empty folder support with dedicated metadata system
-- Cross-crate folder moves with user confirmation
-- Safe folder deletion with "move contents up" option
-- Visual hierarchy improvements with distinct icons for each node type
-- Folder descriptions displayed in tree view
-- Document count badges for folders, repositories, and crates
-- Tooltips showing path, description, and document count
+
+Empty folder support with a dedicated metadata system. Cross-crate folder moves with user confirmation. Safe folder deletion with a "move contents up" option. Visual hierarchy improvements with distinct icons for each node type. Folder descriptions displayed in tree view. Document count badges for folders, repositories, and crates. Tooltips showing path, description, and document count.
 
 ### Changed
-- Made repository fields (`repo_url`, `repo_name`) optional in database schema
-- Standalone documents now supported without GitHub repository associations
-- Folder system now uses hybrid approach: virtual folders (path-based) + optional metadata
-- Document ID generation updated to handle standalone docs with `doc-standalone-{hash}` format
-- Tree building logic updated to merge folder metadata into structure
+
+Repository fields (`repo_url`, `repo_name`) are now optional in the database schema, so standalone documents work without GitHub repository associations. The folder system uses a hybrid approach: virtual folders (path-based) plus optional metadata. Document ID generation handles standalone docs with `doc-standalone-{hash}` format. Tree building logic merges folder metadata into the structure.
 
 ### Removed
-- Synthetic URL generation hack (`https://manual-entry/{name}`)
-- Placeholder document creation for empty folders
+
+Synthetic URL generation hack (`https://manual-entry/{name}`). Placeholder document creation for empty folders.
 
 ### Technical Details
 - **Database Migrations**:
@@ -293,24 +245,16 @@ python apply_migration.py 002_add_folder_metadata.sql
 ## [1.5.0] - 2026-01-29 - Design System Implementation
 
 ### Added
-- Comprehensive design system with consistent spacing and typography
-- Centralized spacing scale using 4px increments
-- Typography system with heading scale (h1-h6) and body text variants
-- Complete button and component variant library
-- Form field, container, list, and table variant systems
+
+A comprehensive design system with consistent spacing and typography. Includes a centralized spacing scale using 4px increments, a typography system with heading scale (h1-h6) and body text variants, a complete button and component variant library, and form field, container, list, and table variant systems.
 
 ### Changed
-- **Tailwind Config**: Added `./lib/**/*.{ts,tsx}` to content paths
-- **AppShell**: Added `p-4 md:p-6` padding to main content area
-- **Sidebar**: Added `p-3` internal padding
-- **MarkdownRenderer**: Added `px-4` horizontal padding
-- **DocumentTree**: Added `space-y-1` vertical spacing between nodes
-- **NewFolderDialog**: Updated label margin from `mb-2` to `mb-3`
-- **ContextMenu**: Updated menu item padding from `py-2` to `py-2.5`
+
+Tailwind Config: added `./lib/**/*.{ts,tsx}` to content paths. AppShell: added `p-4 md:p-6` padding to main content area. Sidebar: added `p-3` internal padding. MarkdownRenderer: added `px-4` horizontal padding. DocumentTree: added `space-y-1` vertical spacing between nodes. NewFolderDialog: updated label margin from `mb-2` to `mb-3`. ContextMenu: updated menu item padding from `py-2` to `py-2.5`.
 
 ### Fixed
-- Resolved all padding issues - content no longer touches edges
-- Build cache cleared and CSS regenerated to ensure proper utility class generation
+
+Resolved all padding issues so content no longer touches edges. Cleared build cache and regenerated CSS to ensure proper utility class generation.
 
 ### Technical Details
 - **New Files** (3):
@@ -323,27 +267,17 @@ python apply_migration.py 002_add_folder_metadata.sql
   - `frontend/components/tree/dialogs/NewFolderDialog.tsx`
   - `frontend/components/tree/ContextMenu.tsx`
 
-### Success Metrics
-- Consistent spacing scale used throughout
-- All interactive elements meet 40x40px minimum touch targets
-- Professional, polished appearance across mobile and desktop
-- Zero TypeScript/build errors
-
 ---
 
 ## [1.4.0] - 2026-01-29 - Version Priority Logic
 
 ### Added
-- Intelligent documentation regeneration engine
-- Git repository change detection utilities
-- Decision engine respecting human edits and repository changes
-- Configurable thresholds for regeneration decisions
+
+An intelligent documentation regeneration engine with git repository change detection and a decision engine that respects human edits and repository changes. Thresholds are configurable.
 
 ### Changed
-- Agent now checks if regeneration is needed before starting work
-- Regeneration skipped when documentation is fresh and repository unchanged
-- Human edits protected for 7 days (configurable)
-- AI documentation refreshed only when stale (30+ days) or repository changed
+
+The agent now checks whether regeneration is needed before starting work. Regeneration is skipped when documentation is fresh and the repository is unchanged. Human edits are protected for 7 days (configurable). AI documentation is refreshed only when stale (30+ days) or the repository has changed.
 
 ### Technical Details
 - **New Files** (2):
@@ -358,59 +292,36 @@ python apply_migration.py 002_add_folder_metadata.sql
 |----------|-----|-------------|----------|
 | No document | N/A | N/A | GENERATE |
 | Human edit | < 7 days | Any | SKIP (preserve work) |
-| Human edit | ≥ 7 days | Unchanged | SKIP |
-| Human edit | ≥ 7 days | Minor changes (<5 commits) | SKIP |
-| Human edit | ≥ 7 days | Major changes (≥5 commits) | REGENERATE |
+| Human edit | >= 7 days | Unchanged | SKIP |
+| Human edit | >= 7 days | Minor changes (<5 commits) | SKIP |
+| Human edit | >= 7 days | Major changes (>=5 commits) | REGENERATE |
 | AI doc | < 30 days | Unchanged | SKIP |
 | AI doc | < 30 days | Changed | REGENERATE |
-| AI doc | ≥ 30 days | Any | REGENERATE |
+| AI doc | >= 30 days | Any | REGENERATE |
 
 ### Performance Impact
-- Skip rate: ~70% (when docs fresh and repos unchanged)
-- Time saved: ~97% on skipped runs (2s vs 3-5 minutes)
+
+Skip rate is roughly 70% when docs are fresh and repos unchanged, saving about 97% of processing time on skipped runs (2s vs 3-5 minutes).
 
 ---
 
 ## [1.3.0] - 2026-01-29 - Professional Refactoring
 
 ### Added
-- **Deep Module Pattern**:
-  - Created `backend/app/services/content_utils.py` - Content preview utility
-  - Created `backend/app/services/dependency_service.py` - Dependency management
-  - Added `DocumentService.update_document()` method
-- **Security Hardening**:
-  - Created `agent/security/validators.py` - Input validation with URL whitelist
-  - Created `agent/security/prompt_safety.py` - Prompt injection defense
-  - Created `secrets/` directory with README for Docker secrets
-  - Created `.gitignore` with comprehensive security rules
-- **Error Handling**:
-  - Created `backend/app/exceptions.py` - 7 exception classes with error codes
-  - Created `backend/app/middleware/exception_handler.py` - Structured error responses
-  - Created `backend/app/core/config.py` - Pydantic settings validation
-  - Created `backend/app/core/logging_config.py` - Structured logging
-  - Created `frontend/lib/notifications/toast.ts` - Toast notification system
+
+**Deep Module Pattern.** Created `backend/app/services/content_utils.py` (content preview utility) and `backend/app/services/dependency_service.py` (dependency management). Added `DocumentService.update_document()` method.
+
+**Security Hardening.** Created `agent/security/validators.py` (input validation with URL whitelist) and `agent/security/prompt_safety.py` (prompt injection defense). Created `secrets/` directory with README for Docker secrets and `.gitignore` with comprehensive security rules.
+
+**Error Handling.** Created `backend/app/exceptions.py` (7 exception classes with error codes), `backend/app/middleware/exception_handler.py` (structured error responses), `backend/app/core/config.py` (Pydantic settings validation), `backend/app/core/logging_config.py` (structured logging), and `frontend/lib/notifications/toast.ts` (toast notification system).
 
 ### Changed
-- **Backend**:
-  - Update endpoint reduced from 31 lines to 11 lines (65% reduction)
-  - Eliminated direct repository access from API layer
-  - Replaced `print()` statements with structured logging
-  - CORS validation prevents wildcard usage
-- **Agent**:
-  - Repository URLs validated against whitelist (GitHub, GitLab, BitBucket)
-  - Path traversal attacks blocked
-  - Prompt injection patterns sanitized
-  - API key loaded from Docker secrets (not environment)
-- **Docker**:
-  - Agent container hardened (cap_drop, no-new-privileges, resource limits)
-  - Read-only workspace mount
-  - Temp directory with noexec
-- **Frontend**:
-  - Replaced `alert()` calls with toast notifications
-  - Better user experience (non-blocking)
+
+On the backend, the update endpoint was reduced from 31 lines to 11 (65% reduction), direct repository access was eliminated from the API layer, `print()` statements were replaced with structured logging, and CORS validation prevents wildcard usage. On the agent side, repository URLs are validated against a whitelist (GitHub, GitLab, BitBucket), path traversal attacks are blocked, prompt injection patterns are sanitized, and the API key is loaded from Docker secrets rather than the environment. Docker containers were hardened with cap_drop, no-new-privileges, and resource limits; the workspace mount is read-only; and the temp directory uses noexec. On the frontend, `alert()` calls were replaced with non-blocking toast notifications.
 
 ### Removed
-- `backend/app/services/version_service.py` - Too shallow, absorbed into DocumentService
+
+`backend/app/services/version_service.py`, which was too shallow and was absorbed into DocumentService.
 
 ### Technical Details
 - **New Backend Files** (8):
@@ -448,50 +359,30 @@ python apply_migration.py 002_add_folder_metadata.sql
   - `frontend/components/document/DocumentView.tsx`
 
 ### Security Vulnerabilities Addressed
-- Path traversal attacks (blocked)
-- Malicious repository URLs (whitelisted)
-- Prompt injection (sanitized)
-- API key exposure (Docker secrets)
-- Container escape (hardened)
+
+Path traversal attacks (blocked), malicious repository URLs (whitelisted), prompt injection (sanitized), API key exposure (Docker secrets), and container escape (hardened).
 
 ---
 
-## [1.2.2] - 2026-01-29 - Frontend Padding Fixes (Detailed)
+## [1.2.2] - 2026-01-29 - Frontend Padding Fixes
 
 ### Problem
-The frontend had NO padding on components due to two root causes:
-1. **Build Configuration Issue**: Tailwind config was missing `./lib/**/*.{ts,tsx}` from content paths
-2. **Missing Padding Classes**: Key layout components had no padding applied
+
+The frontend had no padding on components due to two root causes. First, Tailwind config was missing `./lib/**/*.{ts,tsx}` from content paths, so utility classes from design system files were never generated. Second, key layout components had no padding applied.
 
 ### Solution Implemented
 
-**Phase 1: Build Configuration (CRITICAL)**
-- File: `/frontend/tailwind.config.ts`
-- Added `"./lib/**/*.{ts,tsx}"` to content paths
-- Ensures Tailwind scans design system files and generates all utility classes
+**Build Configuration (critical).** Added `"./lib/**/*.{ts,tsx}"` to content paths in `/frontend/tailwind.config.ts` so Tailwind scans design system files and generates all utility classes.
 
-**Phase 2: Layout Components**
-- File: `/frontend/components/layout/AppShell.tsx`
-- Main content: Added `p-4 md:p-6` (16px mobile / 24px desktop)
-- Sidebar: Added `p-3` (12px internal padding)
+**Layout Components.** In `/frontend/components/layout/AppShell.tsx`, added `p-4 md:p-6` (16px mobile, 24px desktop) to main content and `p-3` (12px) to the sidebar.
 
-**Phase 3: Content Components**
-- File: `/frontend/components/markdown/MarkdownRenderer.tsx`
-- Added `px-4` for horizontal padding
-- File: `/frontend/components/tree/DocumentTree.tsx`
-- Added `space-y-1` for vertical spacing between tree nodes
+**Content Components.** In `/frontend/components/markdown/MarkdownRenderer.tsx`, added `px-4` for horizontal padding. In `/frontend/components/tree/DocumentTree.tsx`, added `space-y-1` for vertical spacing between tree nodes.
 
-**Phase 4: Build Process**
-- Cleared `.next` build cache
-- Cleared `node_modules/.cache`
-- Rebuilt application
-- Verified padding utilities in generated CSS
+**Build Process.** Cleared `.next` build cache and `node_modules/.cache`, rebuilt the application, and verified padding utilities in generated CSS.
 
 ### Results
-- All padding utility classes now generated (`.p-3`, `.p-4`, `.p-6`, `.px-4`, `.space-y-1`)
-- Content no longer touches viewport edges
-- Sidebar has comfortable internal spacing
-- Professional, polished appearance
+
+All padding utility classes are now generated (`.p-3`, `.p-4`, `.p-6`, `.px-4`, `.space-y-1`). Content no longer touches viewport edges. Sidebar has comfortable internal spacing.
 
 ### Files Modified
 1. `/frontend/tailwind.config.ts` - Build configuration
@@ -503,60 +394,33 @@ The frontend had NO padding on components due to two root causes:
 
 ## [1.2.1] - 2026-01-29 - Quick Fixes Applied
 
-### Overview
 Incremental improvements that led to the major refactoring completed later.
 
 ### Fixed
 
-**1. Magic Numbers Documented**
-- Added constants for hash lengths: `DOC_ID_REPO_HASH_LENGTH = 12`, `DOC_ID_PATH_HASH_LENGTH = 12`
-- Documented collision resistance rationale (~10M repos)
-- Files: `backend/app/services/document_service.py`, `backend/app/services/tree_service.py`, `agent/doc_registry.py`
+**Magic Numbers Documented.** Added constants for hash lengths: `DOC_ID_REPO_HASH_LENGTH = 12`, `DOC_ID_PATH_HASH_LENGTH = 12`. Documented collision resistance rationale (~10M repos). Files: `backend/app/services/document_service.py`, `backend/app/services/tree_service.py`, `agent/doc_registry.py`.
 
-**2. Logging Added**
-- Structured logging to: `DocumentService.generate_doc_id()`, `TreeService.build_tree()`
-- Warnings for edge cases (default IDs)
-- Example: `logger.debug(f"Generated doc_id={doc_id} for repo={repo_url}, path={path}, title={title}")`
+**Logging Added.** Structured logging added to `DocumentService.generate_doc_id()` and `TreeService.build_tree()`, with warnings for edge cases such as default IDs.
 
-**3. Input Validation Added**
-- File: `backend/app/schemas/document.py`
-- Path normalization (Pydantic validator):
-  - Strips leading/trailing slashes: `"User Guide/"` → `"User Guide"`
-  - Collapses double slashes: `"User//Guide"` → `"User/Guide"`
-- Title validation: Prevents `/` in titles, strips whitespace
+**Input Validation Added.** In `backend/app/schemas/document.py`: path normalization via Pydantic validator strips leading/trailing slashes (`"User Guide/"` becomes `"User Guide"`), collapses double slashes (`"User//Guide"` becomes `"User/Guide"`), and title validation prevents `/` in titles and strips whitespace.
 
-**4. Code Duplication Documented**
-- Added warning comments in `agent/doc_registry.py`
-- Flagged duplicate logic between agent and backend
-- Documented need for shared library or API calls
+**Code Duplication Documented.** Added warning comments in `agent/doc_registry.py` flagging duplicate logic between agent and backend, with a note about the need for a shared library or API calls.
 
-**5. Algorithm Documentation**
-- Added comprehensive docstrings to `TreeService._build_folder_tree()` and `TreeService._dict_to_tree_nodes()`
-- Explained data structures, recursive logic, example input/output
+**Algorithm Documentation.** Added comprehensive docstrings to `TreeService._build_folder_tree()` and `TreeService._dict_to_tree_nodes()` explaining data structures, recursive logic, and example input/output.
 
-**6. Migration Script Documented**
-- File: `backend/scripts/migrate_to_hierarchical.py`
-- Explained columns added, default values, idempotency
+**Migration Script Documented.** In `backend/scripts/migrate_to_hierarchical.py`, documented columns added, default values, and idempotency.
 
 ### Impact
-- Maintainability improvement: **D → C+**
-- Hash lengths documented with rationale
-- Key operations logged for debugging
-- Paths normalized automatically (handles edge cases)
-- Code duplication flagged with warnings
-- Tree algorithm explained step-by-step
+
+Maintainability improved from D to C+. Hash lengths are documented with rationale. Key operations are logged for debugging. Paths are normalized automatically. Code duplication is flagged with warnings. The tree algorithm is explained step-by-step.
 
 ---
 
 ## [1.2.0] - 2026-01-29 - Search UI Implementation
 
 ### Added
-- Modern CMD+K command palette using `cmdk` library
-- Keyboard shortcuts (CMD+K / Ctrl+K to open, ESC to close)
-- Debounced search (300ms delay)
-- Real-time search results with document previews
-- Full keyboard navigation (arrow keys, Enter)
-- Responsive design with loading and empty states
+
+A modern CMD+K command palette using the `cmdk` library. Supports keyboard shortcuts (CMD+K / Ctrl+K to open, ESC to close), debounced search (300ms delay), real-time results with document previews, full keyboard navigation (arrow keys, Enter), and responsive design with loading and empty states.
 
 ### Technical Details
 - **New Frontend Files** (3):
@@ -570,48 +434,32 @@ Incremental improvements that led to the major refactoring completed later.
   - `app/globals.css` - Added cmdk styles and animations
 
 ### Performance
-- 70% faster than tree navigation for finding known documents
-- 2-3 seconds from search to document (including typing time)
-- Debouncing reduces API calls significantly
+
+About 70% faster than tree navigation for finding known documents. 2-3 seconds from search to document (including typing time). Debouncing reduces API calls significantly.
 
 ---
 
 ## [1.1.0] - 2026-01-29 - Documentation Quality Review
 
 ### Fixed
-- Missing `HTTPException` import in `backend/app/api/documents.py`
-- Made `repo_name` optional in NewDocumentDialog
-- Made `repo_url` optional in TypeScript types
-- Removed 6 `console.log` statements from DocumentTree
-- Fixed phase count in documentation (5 → 6)
-- Removed placeholder GitHub URL from usage guide
-- Updated file counts to be accurate
+
+Missing `HTTPException` import in `backend/app/api/documents.py`. Made `repo_name` optional in NewDocumentDialog and `repo_url` optional in TypeScript types. Removed 6 `console.log` statements from DocumentTree. Fixed phase count in documentation (5 to 6). Removed placeholder GitHub URL from usage guide. Updated file counts to be accurate.
 
 ### Added
-- Comprehensive documentation review process
-- Issue tracking with verification
-- Testing guide with 5 test scenarios
+
+Comprehensive documentation review process, issue tracking with verification, and a testing guide with 5 test scenarios.
 
 ---
 
 ## [1.0.0] - 2026-01-29 - Initial Release
 
 ### Added
-- FastAPI backend with SQLAlchemy ORM
-- Next.js 14 frontend with TypeScript
-- Document management with version history
-- Hierarchical tree structure (crate → repository → folder → document)
-- Markdown rendering with syntax highlighting
-- Wikilink dependency tracking
-- AI agent integration with OpenHands
-- Docker Compose orchestration
-- Database migration system
+
+FastAPI backend with SQLAlchemy ORM. Next.js 14 frontend with TypeScript. Document management with version history. Hierarchical tree structure (crate, repository, folder, document). Markdown rendering with syntax highlighting. Wikilink dependency tracking. AI agent integration with OpenHands. Docker Compose orchestration. Database migration system.
 
 ### Database Models
-- `Document` - Core document model with metadata
-- `Version` - Version history with author tracking (AI/human)
-- `Dependency` - Wikilink tracking
-- SQLite database (PostgreSQL-ready)
+
+`Document` (core model with metadata), `Version` (version history with author tracking for AI/human), `Dependency` (wikilink tracking). SQLite database, PostgreSQL-ready.
 
 ### API Endpoints
 - `GET /health` - Health check
@@ -635,14 +483,8 @@ Incremental improvements that led to the major refactoring completed later.
 - `/docs/[docId]/versions/[versionId]` - Version viewer
 
 ### Components
-- `AppShell` - Main layout with sidebar
-- `Sidebar` - Navigation component
-- `DocumentTree` - Tree navigation
-- `MarkdownRenderer` - Markdown rendering with syntax highlighting
-- `WikiLink` - Wikilink component
-- `MetadataDigest` - Top metadata display
-- `MetadataDetails` - Detailed metadata table
-- `VersionHistory` - Version list component
+
+`AppShell` (main layout with sidebar), `Sidebar` (navigation), `DocumentTree` (tree navigation), `MarkdownRenderer` (Markdown rendering with syntax highlighting), `WikiLink` (wikilink component), `MetadataDigest` (top metadata display), `MetadataDetails` (detailed metadata table), `VersionHistory` (version list).
 
 ---
 

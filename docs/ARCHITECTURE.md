@@ -2,9 +2,9 @@
 
 ## System Overview
 
-IsoCrates is an AI-powered technical documentation platform built around three cooperating layers. The **Frontend** (Next.js 14) provides the user-facing experience: a document viewer, tree navigation, CMD+K search, and version history. Behind it sits the **Backend** (FastAPI + SQLite), which exposes a REST API organized into deep module services with structured error handling and configuration validation. Finally, the **Agent** (OpenHands SDK in Docker) acts as an autonomous documentation generator, hardened against prompt injection and running inside a sandboxed container.
+IsoCrates is an AI-powered technical documentation platform made of three cooperating layers. Think of it like a restaurant: the **Frontend** (Next.js 14) is the dining room where users browse documents, navigate the tree, search with CMD+K, and view version history. The **Backend** (FastAPI + SQLite) is the kitchen, exposing a REST API with structured error handling and configuration validation. The **Agent** (OpenHands SDK in Docker) is a sous-chef that autonomously generates documentation inside a sandboxed container, hardened against prompt injection.
 
-Because the frontend and backend communicate exclusively through a validated CORS-enabled REST API, each layer can evolve independently. The backend's service layer encapsulates all business logic so that API endpoints remain thin, and the SQLite database stores documents, versions, dependencies, folder metadata, users, and the personal organization tables. The agent, in turn, connects to the same REST API from within its sandboxed Docker environment, using security validators and the OpenHands SDK to generate documentation safely.
+The frontend and backend talk exclusively through a validated CORS-enabled REST API, so each layer can change independently. The backend's service layer holds all business logic, keeping API endpoints thin. SQLite stores documents, versions, dependencies, folder metadata, users, and personal organization tables. The agent connects to the same REST API from inside its Docker sandbox, using security validators and the OpenHands SDK to generate documentation safely.
 
 ```mermaid
 graph TD
@@ -136,7 +136,7 @@ UNIQUE(user_id, folder_id, document_id)
 
 ### Relationships
 
-Documents have a `path` field where the first segment is the "crate" (top-level category). Document IDs are generated from `repo_url + path + title` for hierarchical documents or from `repo_url + doc_type` for legacy documents. When creating a nested folder such as `a/b/c`, the system automatically creates metadata records for all ancestors (`a` and `a/b`), which means callers never need to worry about intermediate paths. The personal tree uses references rather than copies, so deleting a document cascades to its personal refs throughout the system.
+Each document has a `path` field where the first segment is the "crate" (the top-level category, like a filing cabinet drawer). Document IDs are generated from `repo_url + path + title` for hierarchical documents, or from `repo_url + doc_type` for legacy ones. When you create a nested folder like `a/b/c`, the system automatically creates metadata records for all ancestors (`a` and `a/b`), so callers never need to build parent paths by hand. The personal tree uses references rather than copies. Think of it like bookmarks: deleting a document cascades to its personal refs throughout the system.
 
 ---
 
@@ -144,7 +144,7 @@ Documents have a `path` field where the first segment is the "crate" (top-level 
 
 ### DocumentService (Deep Module)
 
-DocumentService orchestrates all document operations behind a simple interface. The guiding principle is that endpoints should be 5-15 lines long, because all complexity lives inside the service rather than leaking into the route handlers. This means a bloated endpoint that previously handled querying, validation, versioning, and dependency extraction collapses into a single service call.
+DocumentService orchestrates all document operations behind a simple interface. Think of it like a receptionist: you make one request, and it handles everything behind the scenes. The guiding principle is that endpoints should be 5-15 lines long because all complexity lives inside the service, not in route handlers. A bloated endpoint that used to handle querying, validation, versioning, and dependency extraction collapses into a single service call.
 
 **Before (shallow):**
 ```python
@@ -167,25 +167,25 @@ def update_document(doc_id, data, db):
     return document_service.update_document(db, doc_id, data)
 ```
 
-The public interface exposes `create_or_update_document()` for upserting with version tracking and dependency extraction, along with `update_document()` for updates that automatically create new versions. Standard retrieval and lifecycle methods include `get_document()`, `list_documents()`, and `delete_document()`. For organizational changes there is `move_document()`, which relocates a document to a different folder path. Metadata-specific updates are handled by `update_keywords()` and `update_repo_url()`. The service also provides `search_documents()` for full-text search and `resolve_wikilink()` for cross-reference resolution, which delegates internally to DependencyService.
+The public interface exposes `create_or_update_document()` for upserting with version tracking and dependency extraction, along with `update_document()` for updates that automatically create new versions. Standard retrieval and lifecycle methods include `get_document()`, `list_documents()`, and `delete_document()`. For organizational changes, `move_document()` relocates a document to a different folder path. Metadata-specific updates are handled by `update_keywords()` and `update_repo_url()`. The service also provides `search_documents()` for full-text search and `resolve_wikilink()` for cross-reference resolution, which internally delegates to DependencyService.
 
 ### FolderService (Deep Module)
 
-FolderService is a single class that handles all folder and tree operations. All path validation, ancestor creation, and tree construction are private internals, which means the public surface stays small: `create_folder`, `delete_folder`, `move_folder`, `get_tree`, `update_folder`, `get_folder`, `list_folders`, and `cleanup_orphans`.
+FolderService is a single class handling all folder and tree operations. All path validation, ancestor creation, and tree construction are private internals, keeping the public surface small: `create_folder`, `delete_folder`, `move_folder`, `get_tree`, `update_folder`, `get_folder`, `list_folders`, and `cleanup_orphans`.
 
-Several key behaviors define how the service works in practice. Creating folder `a/b/c` automatically creates the ancestors `a` and `a/b`, so callers never need to build parent paths manually. Deletion supports two modes: `move_up` re-parents the folder's contents to its parent, while `delete_all` removes the folder and everything inside it. Tree building produces a 2-level hierarchy and marks top-level folders with `is_crate=True` so the frontend can render them distinctly.
+A few key behaviors define how the service works in practice. Creating folder `a/b/c` automatically creates ancestors `a` and `a/b`, so callers never build parent paths manually. Deletion supports two modes: `move_up` re-parents the folder's contents to its parent, while `delete_all` removes the folder and everything inside it. Tree building produces a 2-level hierarchy and marks top-level folders with `is_crate=True` so the frontend can render them distinctly.
 
 ### DependencyService (Deep Module)
 
-DependencyService manages all document-to-document relationships. The `create_dependency()` method validates that both documents exist, prevents self-links, and detects circular dependencies using depth-first search before performing an idempotent creation. The `replace_document_dependencies()` method extracts wikilinks from document content, resolves targets, and recreates all outgoing dependencies; DocumentService calls this automatically on every save. Finally, `get_all_dependencies()` returns the full dependency graph, which the frontend uses for visualization.
+DependencyService manages all document-to-document relationships. Think of dependencies like hyperlinks between wiki pages. The `create_dependency()` method validates that both documents exist, prevents self-links, and detects circular dependencies using depth-first search before performing an idempotent creation. The `replace_document_dependencies()` method extracts wikilinks from document content, resolves targets, and recreates all outgoing dependencies; DocumentService calls this automatically on every save. Finally, `get_all_dependencies()` returns the full dependency graph, which the frontend uses for visualization.
 
 ### PersonalTreeService
 
-PersonalTreeService provides per-user document organization using references rather than copies. It manages personal folders and document refs stored in the `personal_*` tables, so each user can organize documents into their own hierarchy without duplicating content.
+PersonalTreeService provides per-user document organization using references rather than copies. Think of it like creating bookmarks or playlists: each user can arrange documents into their own hierarchy without duplicating content. It manages personal folders and document refs stored in the `personal_*` tables.
 
 ### Repository Pattern
 
-All data access goes through repository classes (`DocumentRepository`, `FolderRepository`, `VersionRepository`, `DependencyRepository`). Services never touch the ORM directly, which means the persistence layer can be swapped or tested independently.
+All data access goes through repository classes (`DocumentRepository`, `FolderRepository`, `VersionRepository`, `DependencyRepository`). Services never touch the ORM directly. This is like having a dedicated librarian fetch books for you instead of wandering the stacks yourself. It means the persistence layer can be swapped or tested independently.
 
 ### Exception Hierarchy
 
@@ -215,7 +215,7 @@ Error responses follow a consistent structure:
 }
 ```
 
-Middleware catches all custom exceptions and converts them to structured JSON responses. As a result, the frontend can rely on a predictable error shape and displays problems as toast notifications rather than using `alert()`.
+Middleware catches all custom exceptions and converts them to structured JSON responses. The frontend can rely on a predictable error shape and displays problems as toast notifications rather than `alert()`.
 
 ### Authentication & Permission System
 
@@ -227,7 +227,9 @@ optional_auth(credentials, db) -> AuthContext  # Always returns a context, never
 require_admin(auth) -> AuthContext             # 403 if not admin role
 ```
 
-`AuthContext` is a frozen dataclass containing `user_id`, `role`, and `grants` (a list of FolderGrant objects loaded from the database). The behavior of these dependencies varies by environment. When `AUTH_ENABLED=false`, both `require_auth` and `optional_auth` return an anonymous admin context with a root grant that provides full access; this is a development convenience that eliminates the need for tokens. When `AUTH_ENABLED=true` and the request carries a valid token, the system returns the user's context with their grants loaded from the database. When `AUTH_ENABLED=true` but the request has no token or an invalid token, `require_auth` raises a 401 error, while `optional_auth` returns an `_UNAUTHENTICATED` context with empty grants. Because permission checks still run against those empty grants, unauthenticated requests are denied everything; this design ensures they never bypass permission filtering.
+`AuthContext` is a frozen dataclass containing `user_id`, `role`, and `grants` (a list of FolderGrant objects loaded from the database). Think of grants like keycards: each one unlocks a specific section of the building.
+
+The behavior varies by environment. When `AUTH_ENABLED=false`, both `require_auth` and `optional_auth` return an anonymous admin context with a root grant providing full access. This is a development convenience that eliminates the need for tokens. When `AUTH_ENABLED=true` and the request carries a valid token, the system returns the user's context with their grants loaded from the database. When `AUTH_ENABLED=true` but the request has no token or an invalid one, `require_auth` raises a 401 error, while `optional_auth` returns an `_UNAUTHENTICATED` context with empty grants. Because permission checks still run against those empty grants, unauthenticated requests are denied everything. This design ensures they never bypass permission filtering.
 
 Token management lives in **`backend/app/core/token_factory.py`**, which provides two pure functions for JWT handling:
 
@@ -236,7 +238,7 @@ create_token(subject, role, secret, algorithm="HS256", expires_hours=24) -> str
 decode_token(token, secret, algorithm="HS256") -> Optional[TokenPayload]  # None on any failure
 ```
 
-These use hand-rolled HMAC-SHA256 via the standard library only, avoiding any python-jose dependency. Importantly, `decode_token` returns `None` on bad signatures, expired tokens, or malformed input and never raises an exception, which simplifies error handling throughout the calling code.
+These use hand-rolled HMAC-SHA256 via the standard library only, avoiding any python-jose dependency. `decode_token` returns `None` on bad signatures, expired tokens, or malformed input and never raises an exception, which simplifies error handling throughout the calling code.
 
 Permission checks are centralized in **`backend/app/services/permission_service.py`** through a single pure function:
 
@@ -244,32 +246,32 @@ Permission checks are centralized in **`backend/app/services/permission_service.
 check_permission(grants: list[FolderGrant], doc_path: str, action: str) -> bool
 ```
 
-This function finds the longest matching `path_prefix` from the user's grants and checks whether the grant's role permits the requested action. The role hierarchy follows admin > editor > viewer, and the supported actions are read, edit, delete, and admin. If no grant matches, access is denied. Consequently, unauthorized documents return 404 rather than 403 to prevent information leakage about what exists. Adopters who want a different permission model need only replace this one function.
+This function finds the longest matching `path_prefix` from the user's grants and checks whether the grant's role permits the requested action. The role hierarchy follows admin > editor > viewer, and the supported actions are read, edit, delete, and admin. If no grant matches, access is denied. Unauthorized documents return 404 rather than 403 to prevent leaking information about what exists. Anyone who wants a different permission model only needs to replace this one function.
 
 User lifecycle and grant management are handled by **`backend/app/services/auth_service.py`**. The `register_user()` method automatically promotes the first registered user to admin with a root grant and hashes passwords with bcrypt. The `authenticate()` method validates email/password combinations and either returns the User object or raises an exception. Grant management through `create_grant()` and `revoke_grant()` is restricted to admin users only.
 
-The corresponding HTTP layer is defined in **`backend/app/api/auth_routes.py`**, which exposes `POST /api/auth/register` (open for the first user, admin-only thereafter), `POST /api/auth/login` (returns JWT plus user info and grants), `GET /api/auth/me` (current user context), `GET /api/auth/users` (admin-only user listing), `PUT /api/auth/users/{id}/role` (admin-only role changes), `POST /api/auth/users/{id}/grants` (admin-only grant creation), and `DELETE /api/auth/users/{id}/grants/{path}` (admin-only grant revocation).
+The corresponding HTTP layer is defined in **`backend/app/api/auth_routes.py`**. It exposes `POST /api/auth/register` (open for the first user, admin-only after that), `POST /api/auth/login` (returns JWT plus user info and grants), `GET /api/auth/me` (current user context), `GET /api/auth/users` (admin-only user listing), `PUT /api/auth/users/{id}/role` (admin-only role changes), `POST /api/auth/users/{id}/grants` (admin-only grant creation), and `DELETE /api/auth/users/{id}/grants/{path}` (admin-only grant revocation).
 
 ### Request Context Middleware
 
-**`backend/app/middleware/request_context.py`** implements a single deep middleware that handles four cross-cutting concerns in one pass. It generates or reads an `X-Request-ID` header and stores it in a `contextvars.ContextVar` for correlation. It records the request start time and sets an `X-Response-Time` header on the response. It calls a `check_rate_limit()` pure function and returns 429 if the limit is exceeded. Finally, it logs a structured record containing the method, path, status code, duration in milliseconds, and request ID for every request.
+**`backend/app/middleware/request_context.py`** implements a single deep middleware that handles four cross-cutting concerns in one pass. It generates or reads an `X-Request-ID` header and stores it in a `contextvars.ContextVar` for correlation. It records the request start time and sets an `X-Response-Time` header on the response. It calls a `check_rate_limit()` pure function and returns 429 if the limit is exceeded. It logs a structured record containing the method, path, status code, duration in milliseconds, and request ID for every request.
 
 The rate limiter itself is a pure function that can be tested without any HTTP infrastructure:
 ```python
 def check_rate_limit(bucket: dict, key: str, max_per_minute: int, now: float) -> tuple[bool, float]
 ```
 
-It uses a token bucket algorithm with refill, and health, docs, and OpenAPI paths are exempt from rate limiting.
+It uses a token bucket algorithm with refill. Health, docs, and OpenAPI paths are exempt from rate limiting.
 
 ---
 
 ## Security
 
-Security in IsoCrates spans input validation, prompt injection defense, container hardening, secrets management, and CORS enforcement. Each layer reinforces the others, so a failure in one area does not compromise the entire system.
+Security in IsoCrates works in layers, like locks on a series of doors. Input validation, prompt injection defense, container hardening, secrets management, and CORS enforcement each reinforce the others, so a failure in one area does not compromise the entire system.
 
 ### Input Validation
 
-All repository URLs pass through a strict validator before the agent processes them, ensuring that only HTTPS connections to whitelisted hosts are accepted and path traversal attempts are blocked:
+All repository URLs pass through a strict validator before the agent processes them, ensuring only HTTPS connections to whitelisted hosts are accepted and path traversal attempts are blocked:
 
 ```python
 # agent/security/validators.py
@@ -282,7 +284,7 @@ class RepositoryValidator:
 
 ### Prompt Injection Defense
 
-Since the agent processes user-supplied repository names and file paths, prompt injection is a real risk. The `PromptSanitizer` class scans for dangerous patterns and sanitizes filenames to prevent directory traversal:
+Since the agent processes user-supplied repository names and file paths, prompt injection is a real risk. Imagine someone naming a repo "ignore all previous instructions." The `PromptSanitizer` class scans for these dangerous patterns and sanitizes filenames to prevent directory traversal:
 
 ```python
 # agent/security/prompt_safety.py
@@ -295,7 +297,7 @@ class PromptSanitizer:
 
 ### Docker Hardening
 
-The agent container runs with all Linux capabilities dropped and new privilege escalation disabled. Resource limits on memory and process IDs prevent runaway consumption, which means even a compromised agent cannot exhaust host resources:
+The agent container runs with all Linux capabilities dropped and new privilege escalation disabled. Resource limits on memory and process IDs prevent runaway consumption, so even a compromised agent cannot exhaust host resources:
 
 ```yaml
 doc-agent:
@@ -310,11 +312,11 @@ doc-agent:
 
 ### Secrets Management
 
-In development, `OPENROUTER_API_KEY` is stored in `.env`. In production, Docker secrets provide the key through a file path (`OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key`). The agent loads from the file first and falls back to the environment variable only if the file is absent, which means production deployments never expose secrets through environment inspection.
+In development, `OPENROUTER_API_KEY` is stored in `.env`. In production, Docker secrets provide the key through a file path (`OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key`). The agent loads from the file first and falls back to the environment variable only if the file is absent. This means production deployments never expose secrets through environment inspection.
 
 ### CORS Validation
 
-To prevent accidental misconfiguration, Pydantic settings reject wildcard CORS origins at startup. This validation runs before the application accepts any requests, so a deployment with `"*"` in the allowed origins list will fail immediately rather than silently allowing cross-origin access:
+To prevent accidental misconfiguration, Pydantic settings reject wildcard CORS origins at startup. This validation runs before the application accepts any requests, so a deployment with `"*"` in the allowed origins list fails immediately rather than silently allowing cross-origin access:
 
 ```python
 class Settings(BaseSettings):
@@ -333,11 +335,11 @@ class Settings(BaseSettings):
 
 ### How openhands_doc.py Works
 
-The documentation agent follows a linear pipeline that enforces safety at every step. It begins by validating the repository URL through `RepositoryValidator` to ensure the target is a whitelisted HTTPS host. Once validated, it clones the repository inside a sandboxed Docker container, which limits the blast radius of any malicious content. The OpenHands SDK then autonomously explores the codebase, building an understanding of the project's structure and purpose. From that understanding it generates comprehensive documentation in markdown with wikilinks for cross-referencing. Before anything is sent to the backend, all output passes through `PromptSanitizer` to strip injection attempts. Finally, the agent POSTs each document to `POST /api/docs`, which performs an upsert.
+The documentation agent follows a linear pipeline that enforces safety at every step, like an assembly line with a quality check at each station. It begins by validating the repository URL through `RepositoryValidator` to ensure the target is a whitelisted HTTPS host. Once validated, it clones the repository inside a sandboxed Docker container, limiting the blast radius of any malicious content. The OpenHands SDK then autonomously explores the codebase, building an understanding of the project's structure and purpose. From that understanding it generates comprehensive documentation in markdown with wikilinks for cross-referencing. Before anything is sent to the backend, all output passes through `PromptSanitizer` to strip injection attempts. Finally, the agent POSTs each document to `POST /api/docs`, which performs an upsert.
 
 ### Multi-Page Generation
 
-The agent's workflow has two phases. First, during the planning phase, it explores the repository and produces a document tree consisting of pages with paths and titles. Then it loops `generate_documentation()` over that tree, generating each sub-page in turn. Each sub-page prompt receives the list of sibling pages so it can produce accurate wikilinks, which means the resulting documentation set is interconnected from the start.
+The agent's workflow has two phases. First, during the planning phase, it explores the repository and produces a document tree consisting of pages with paths and titles. Then it loops `generate_documentation()` over that tree, generating each sub-page in turn. Each sub-page prompt receives the list of sibling pages so it can produce accurate wikilinks. The resulting documentation set is interconnected from the start.
 
 ### Version Priority Engine
 
@@ -353,7 +355,7 @@ The agent's workflow has two phases. First, during the planning phase, it explor
 
 ### Next.js App Structure
 
-The frontend uses Next.js App Router with Tailwind CSS and TypeScript. Pages live under `app/`, components under `components/`, and the API client under `lib/api/`. The key directories reflect the application's functional areas: `components/tree/` contains DocumentTree, PersonalTree, TreeTabs, ContextMenu, and associated dialogs for navigation; `components/document/` holds DocumentView, MetadataDigest, and MetadataDetails for content display; `components/search/` provides the CMD+K search palette through SearchCommand; `components/markdown/` houses the MarkdownRenderer along with MermaidBlock and WikiLink for rich content rendering; and `components/graph/` contains the DependencyGraph built on ReactFlow and dagre. Styling is centralized in `lib/styles/` through a variant system defined in `button-variants.ts`, application state is managed through Zustand stores in `lib/store/` (uiStore, treeStore, searchStore), and user feedback flows through the toast notification system in `lib/notifications/`.
+The frontend uses Next.js App Router with Tailwind CSS and TypeScript. Pages live under `app/`, components under `components/`, and the API client under `lib/api/`. The key directories reflect the application's functional areas. `components/tree/` contains DocumentTree, PersonalTree, TreeTabs, ContextMenu, and associated dialogs for navigation. `components/document/` holds DocumentView, MetadataDigest, and MetadataDetails for content display. `components/search/` provides the CMD+K search palette through SearchCommand. `components/markdown/` houses the MarkdownRenderer along with MermaidBlock and WikiLink for rich content rendering. `components/graph/` contains the DependencyGraph built on ReactFlow and dagre. Styling is centralized in `lib/styles/` through a variant system defined in `button-variants.ts`. Application state is managed through Zustand stores in `lib/store/` (uiStore, treeStore, searchStore). User feedback flows through the toast notification system in `lib/notifications/`.
 
 ### Key Components
 
@@ -361,7 +363,7 @@ The frontend uses Next.js App Router with Tailwind CSS and TypeScript. Pages liv
 
 **PersonalTree** builds on the same tree infrastructure but provides per-user document organization using references rather than copies. Users switch between the organizational and personal trees through the TreeTabs component.
 
-**MarkdownRenderer** handles the full range of content formatting, rendering GFM tables via `remark-gfm`, applying syntax highlighting, rendering Mermaid diagrams through the `MermaidBlock` component, and resolving cross-references through the `WikiLink` component. This means authors can write rich documentation without worrying about renderer limitations.
+**MarkdownRenderer** handles the full range of content formatting: GFM tables via `remark-gfm`, syntax highlighting, Mermaid diagrams through the `MermaidBlock` component, and cross-references through the `WikiLink` component. Authors can write rich documentation without worrying about renderer limitations.
 
 **SearchCommand** implements a CMD+K command palette with Zustand-backed state management, keyboard navigation, and real-time search results. Because state lives in a Zustand store, the search UI stays responsive even during rapid typing.
 
@@ -373,7 +375,7 @@ The application uses Zustand stores for UI state (sidebar visibility, dialog man
 
 ### Style System
 
-All UI elements draw from shared variant objects defined in `lib/styles/button-variants.ts`, which includes buttonVariants, badgeVariants, inputVariants, dialogVariants, tableVariants, scrollContainerVariants, and others. New UI components should use these variants rather than inline Tailwind classes, since the variant system ensures visual consistency across the application. The full details are documented in `frontend/STYLE_GUIDE.md`.
+All UI elements draw from shared variant objects defined in `lib/styles/button-variants.ts`, including buttonVariants, badgeVariants, inputVariants, dialogVariants, tableVariants, scrollContainerVariants, and others. New UI components should use these variants rather than inline Tailwind classes, since the variant system ensures visual consistency across the application. The full details are documented in `frontend/STYLE_GUIDE.md`.
 
 ### Error Boundaries
 
@@ -381,7 +383,7 @@ All UI elements draw from shared variant objects defined in `lib/styles/button-v
 
 ### Portal Pattern
 
-All dialogs and context menus use `createPortal(el, document.body)` to render outside their parent DOM hierarchy. This is necessary because scrollable containers would otherwise clip the overlays, and the portal pattern ensures they always appear above all other content.
+All dialogs and context menus use `createPortal(el, document.body)` to render outside their parent DOM hierarchy. This is necessary because scrollable containers would otherwise clip the overlays. Think of portals like pop-up windows that float above the page instead of being trapped inside a scrollable box.
 
 ---
 
@@ -389,11 +391,11 @@ All dialogs and context menus use `createPortal(el, document.body)` to render ou
 
 ### Backend (Python / FastAPI)
 
-The backend follows a "deep modules" philosophy: endpoints should be 5-15 lines at most, delegating all logic to services. Services return data or raise custom exceptions, and those exceptions should always be the project-specific types like `DocumentNotFoundError` and `CircularDependencyError` rather than bare `HTTPException` calls with status codes. This matters because the middleware converts custom exceptions into structured JSON automatically. All logging should use `logger.info("msg", extra={...})` and never `print()`, since structured logs are essential for debugging in production. Every function signature should carry type hints, and all request and response bodies must be validated through Pydantic schemas, which together ensure that type errors are caught before they reach runtime.
+The backend follows a "deep modules" philosophy: endpoints should be 5-15 lines at most, delegating all logic to services. Services return data or raise custom exceptions. Those exceptions should always be project-specific types like `DocumentNotFoundError` and `CircularDependencyError`, not bare `HTTPException` calls with status codes. This matters because the middleware converts custom exceptions into structured JSON automatically. All logging should use `logger.info("msg", extra={...})` and never `print()`, since structured logs are essential for debugging in production. Every function signature should carry type hints, and all request and response bodies must be validated through Pydantic schemas. Together, these ensure that type errors are caught before they reach runtime.
 
 ### Frontend (TypeScript / React)
 
-On the frontend, user feedback should always go through `toast.success()` and `toast.error()` rather than `alert()`, because toast notifications provide a better user experience and are consistent with the rest of the UI. All API calls should be wrapped in try/catch blocks with structured error display. Type safety is non-negotiable: every data shape should have a corresponding interface, and `any` should never appear in the codebase. Visual consistency comes from the variant system, so new components should use `buttonVariants`, `dialogVariants`, and the other exports from `lib/styles/button-variants.ts`. All overlays must use `createPortal` to avoid clipping issues.
+User feedback should always go through `toast.success()` and `toast.error()` rather than `alert()`, because toast notifications provide a better experience and stay consistent with the rest of the UI. All API calls should be wrapped in try/catch blocks with structured error display. Type safety is non-negotiable: every data shape should have a corresponding interface, and `any` should never appear in the codebase. Visual consistency comes from the variant system, so new components should use `buttonVariants`, `dialogVariants`, and the other exports from `lib/styles/button-variants.ts`. All overlays must use `createPortal` to avoid clipping issues.
 
 ### Agent (Python / OpenHands SDK)
 
@@ -444,7 +446,7 @@ Security is the primary concern in the agent layer. Every operation should valid
 
 ### What to Test
 
-**Unit tests** (pytest) should cover the service layer methods (DocumentService, DependencyService, FolderService), validators for URLs, paths, and prompt sanitization, the exception hierarchy, and ID generation stability (ensuring the same inputs always produce the same ID).
+**Unit tests** (pytest) should cover service layer methods (DocumentService, DependencyService, FolderService), validators for URLs, paths, and prompt sanitization, the exception hierarchy, and ID generation stability (ensuring the same inputs always produce the same ID).
 
 **Integration tests** (pytest + httpx) should exercise all API endpoints across both happy paths and error cases, verify database operations and migrations, and specifically test dependency cycle detection with cycles involving three or more documents.
 
@@ -454,7 +456,7 @@ Security is the primary concern in the agent layer. Every operation should valid
 
 ### Hierarchical Folder Testing
 
-Folder operations require particular attention because of the automatic ancestor creation and multiple deletion modes. Key scenarios to verify include unlimited folder nesting (5+ levels), correct color-coded icons (blue for crates, amber for folders, gray for documents), cross-crate folder moves, folder deletion with both `move_up` and `delete_all` modes, automatic ancestor creation when creating nested folders, and orphaned metadata cleanup.
+Folder operations require particular attention because of automatic ancestor creation and multiple deletion modes. Key scenarios to verify include unlimited folder nesting (5+ levels), correct color-coded icons (blue for crates, amber for folders, gray for documents), cross-crate folder moves, folder deletion with both `move_up` and `delete_all` modes, automatic ancestor creation when creating nested folders, and orphaned metadata cleanup.
 
 ### Migration Testing
 
