@@ -167,16 +167,16 @@ class DocumentPlanner:
 
                 last_raw = raw_text
                 last_error = "Response was valid JSON but missing 'documents' key"
-                print(f"[{label}] Attempt {attempt}/{max_retries}: invalid blueprint structure, retrying...")
+                logger.warning("%s attempt %d/%d: invalid blueprint structure, retrying...", label, attempt, max_retries)
 
             except json.JSONDecodeError as e:
                 last_raw = raw_text  # type: ignore[possibly-undefined]
                 last_error = str(e)
-                print(f"[{label}] Attempt {attempt}/{max_retries}: JSON parse error ({e}), retrying...")
+                logger.warning("%s attempt %d/%d: JSON parse error (%s), retrying...", label, attempt, max_retries, e)
             except Exception as e:
                 last_error = str(e)
                 last_raw = ""
-                print(f"[{label}] Attempt {attempt}/{max_retries}: {e}, retrying...")
+                logger.warning("%s attempt %d/%d: %s, retrying...", label, attempt, max_retries, e)
 
         raise RuntimeError(
             f"{label} failed after {max_retries} attempts. Last error: {last_error}"
@@ -391,15 +391,15 @@ CRITICAL RULES:
 - Output ONLY the JSON object
 """
 
-        print("[Planner] Analyzing scout reports and designing blueprint...")
+        logger.info("Analyzing scout reports and designing blueprint...")
         blueprint = self._call_planner_llm(planner_prompt, label="Planner")
         docs = blueprint["documents"]
-        print(f"[Planner] Blueprint ready: {len(docs)} documents")
-        print(f"   Complexity: {blueprint.get('complexity', 'unknown')}")
-        print(f"   Journey: {blueprint.get('reader_journey', 'N/A')}")
+        logger.info("Blueprint ready: %d documents", len(docs))
+        logger.info("Complexity: %s", blueprint.get("complexity", "unknown"))
+        logger.info("Journey: %s", blueprint.get("reader_journey", "N/A"))
         for doc in docs:
             rationale = doc.get("rationale", "")
-            print(f"   - {doc['title']} ({doc['doc_type']}): {rationale[:60]}...")
+            logger.debug("  - %s (%s): %s...", doc["title"], doc["doc_type"], rationale[:60])
         return blueprint
 
     # ------------------------------------------------------------------
@@ -509,12 +509,12 @@ Output ONLY a valid JSON object (no markdown fences, no commentary).
 CRITICAL: Output ONLY the JSON object. No markdown fences, no commentary.
 """
 
-        print("[Integration Planner] Designing cross-cutting hub pages...")
+        logger.info("Integration Planner: designing cross-cutting hub pages...")
         blueprint = self._call_planner_llm(prompt, label="Integration Planner")
         docs = blueprint["documents"]
-        print(f"[Integration Planner] Blueprint ready: {len(docs)} hub documents")
+        logger.info("Integration Planner: blueprint ready: %d hub documents", len(docs))
         for doc in docs:
-            print(f"   - {doc['title']} ({doc['doc_type']})")
+            logger.debug("  - %s (%s)", doc["title"], doc["doc_type"])
         return blueprint
 
     # ------------------------------------------------------------------
@@ -543,8 +543,8 @@ CRITICAL: Output ONLY the JSON object. No markdown fences, no commentary.
             combined = "\n\n---\n\n".join(reports_by_key.values())
             return self.plan(combined, existing_docs)
 
-        print(f"[Planner] Reports exceed context ({total_report_tokens:,} tokens > "
-              f"{threshold:,} threshold) — using hierarchical planning")
+        logger.info("Reports exceed context (%s tokens > %s threshold) — using hierarchical planning",
+                    f"{total_report_tokens:,}", f"{threshold:,}")
 
         crate_path = f"{self.crate}{self.repo_name}".rstrip("/")
 
@@ -564,7 +564,7 @@ CRITICAL: Output ONLY the JSON object. No markdown fences, no commentary.
         if current_chunk:
             chunks.append(current_chunk)
 
-        print(f"[Planner] Phase 1: {len(chunks)} report groups → mini-plans")
+        logger.info("Phase 1: %d report groups → mini-plans", len(chunks))
 
         mini_plans: list[list[dict]] = []
         for i, chunk in enumerate(chunks, 1):
@@ -601,18 +601,18 @@ Output ONLY the JSON array — no markdown fences, no commentary.
                 docs = json.loads(repair_json(raw))
                 if isinstance(docs, list):
                     mini_plans.append(docs)
-                    print(f"   [Group {i}] {len(docs)} document specs")
+                    logger.info("Group %d: %d document specs", i, len(docs))
                 elif isinstance(docs, dict) and "documents" in docs:
                     mini_plans.append(docs["documents"])
-                    print(f"   [Group {i}] {len(docs['documents'])} document specs")
+                    logger.info("Group %d: %d document specs", i, len(docs["documents"]))
                 else:
-                    print(f"   [Group {i}] Unexpected response format, skipping")
+                    logger.warning("Group %d: unexpected response format, skipping", i)
             except Exception as e:
                 logger.warning("Mini-plan %d failed: %s", i, e)
-                print(f"   [Group {i}] Failed: {e}")
+                logger.warning("Group %d failed: %s", i, e)
 
         if not mini_plans:
-            print("[Planner] All mini-plans failed, falling back to single-pass")
+            logger.warning("All mini-plans failed, falling back to single-pass")
             combined = "\n\n---\n\n".join(reports_by_key.values())
             return self.plan(combined, existing_docs)
 
@@ -653,9 +653,9 @@ Output ONLY a valid JSON object:
 Each document must have: doc_type, title, path, description, sections,
 key_files_to_read, wikilinks_out. Output ONLY JSON — no fences, no commentary.
 """
-        print(f"[Planner] Phase 2: Merging {len(all_specs)} specs into global blueprint...")
+        logger.info("Phase 2: merging %d specs into global blueprint...", len(all_specs))
         blueprint = self._call_planner_llm(merge_prompt, label="Planner Merge")
-        print(f"[Planner] Hierarchical blueprint ready: {len(blueprint['documents'])} documents")
+        logger.info("Hierarchical blueprint ready: %d documents", len(blueprint["documents"]))
         return blueprint
 
 
@@ -673,5 +673,5 @@ def _flatten_single_doc_folders(docs: list[dict], base_path: str) -> list[dict]:
             parent = "/".join(path.split("/")[:-1]) or base_path
             old = path
             doc["path"] = parent
-            print(f"   [Flatten] {doc['title']}: {old} → {parent}")
+            logger.debug("Flatten %s: %s → %s", doc["title"], old, parent)
     return docs

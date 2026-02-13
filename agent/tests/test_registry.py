@@ -1,6 +1,6 @@
 """Tests for document ID generation and metadata parsing.
 
-These are pure functions — no mocking needed.
+These are pure functions -- no mocking needed.
 """
 
 import pytest

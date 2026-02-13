@@ -1,6 +1,9 @@
 {
   "name": "isocrates-frontend",
   "version": "1.0.0",
+  "description": "IsoCrates documentation platform frontend",
+  "author": "IsoCrates Contributors",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "dev": "next dev",

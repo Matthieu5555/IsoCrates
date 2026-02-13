@@ -1,27 +1,32 @@
 """Document API endpoints with path-based permission checks.
 
-Endpoints are thin — DocumentService handles the full lifecycle
+Endpoints are thin. DocumentService handles the full lifecycle
 (CRUD, versioning, wikilink dependencies) as a deep module.
 """
 
-from fastapi import APIRouter, Depends, Query, Body, HTTPException
-from sqlalchemy.orm import Session
+from datetime import datetime
 from typing import List, Optional
 
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
 from ..core.auth import AuthContext, require_auth, require_admin, optional_auth
-from ..database import get_db
-from datetime import datetime
-from fastapi import BackgroundTasks
-from ..schemas.document import DocumentCreate, DocumentResponse, DocumentListResponse, DocumentUpdate, DocumentMoveRequest, DocumentKeywordsUpdate, DocumentRepoUpdate, SearchResultResponse, SimilarDocumentResponse, BatchOperation, BatchResult, BatchParams, GenerateIdRequest, GenerateIdResponse, AskRequest, AskResponse
-from ..schemas.version import VersionResponse
+from ..core.config import settings
+from ..database import get_db, SessionLocal
+from ..exceptions import DocumentNotFoundError, ForbiddenError
 from ..repositories.version_repository import VersionRepository
+from ..schemas.document import (
+    AskRequest, AskResponse, BatchOperation, BatchParams, BatchResult,
+    DocumentCreate, DocumentKeywordsUpdate, DocumentListResponse,
+    DocumentMoveRequest, DocumentRepoUpdate, DocumentResponse,
+    DocumentUpdate, GenerateIdRequest, GenerateIdResponse,
+    SearchResultResponse, SimilarDocumentResponse,
+)
+from ..schemas.version import VersionResponse
 from ..services import DocumentService
 from ..services.dependency_service import DependencyService
 from ..services.embedding_service import EmbeddingService
-from ..database import SessionLocal
 from ..services.permission_service import check_permission, filter_paths_by_grants
-from ..core.config import settings
-from ..exceptions import DocumentNotFoundError, ForbiddenError
 
 router = APIRouter(prefix="/api/docs", tags=["documents"])
 

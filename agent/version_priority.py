@@ -215,7 +215,7 @@ class VersionPriorityEngine:
     ) -> tuple[bool, str, list[str]]:
         """Targeted regeneration: compare stored source file hashes against current.
 
-        This is a faster check than should_regenerate() — it skips version/commit
+        This is a faster check than should_regenerate() -- it skips version/commit
         analysis and directly checks if the source files a doc was generated from
         have changed.
 
@@ -239,7 +239,7 @@ class VersionPriorityEngine:
         stored_hashes = author_metadata.get("source_hashes", {})
 
         if not stored_hashes:
-            # Legacy doc without provenance — fall through to commit-level check
+            # Legacy doc without provenance -- fall through to commit-level check
             return True, "No stored source hashes (legacy doc)", []
 
         # Compare hashes

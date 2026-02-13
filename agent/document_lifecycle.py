@@ -301,7 +301,7 @@ class DocumentLifecycle:
         result = {"deleted": 0, "preserved_human": 0, "preserved_user_organized": 0, "preserved_failed": 0, "errors": []}
 
         if not snapshot["doc_ids"]:
-            logger.info("No snapshot — skipping orphan cleanup")
+            logger.info("No snapshot - skipping orphan cleanup")
             return result
 
         # Circuit breaker: refuse to delete when the generation run
@@ -309,12 +309,12 @@ class DocumentLifecycle:
         # network blip must NEVER destroy existing documentation.
         total_attempted = len(generated_ids) + len(failed_ids)
         if total_attempted == 0:
-            logger.warning("SAFETY: No documents were attempted — skipping orphan cleanup entirely")
+            logger.warning("SAFETY: No documents were attempted - skipping orphan cleanup entirely")
             return result
 
         success_rate = len(generated_ids) / total_attempted
         if success_rate < 0.5:
-            logger.warning("SAFETY: Only %d/%d documents succeeded (%.0f%%) — skipping orphan cleanup to protect existing docs",
+            logger.warning("SAFETY: Only %d/%d documents succeeded (%.0f%%) - skipping orphan cleanup to protect existing docs",
                          len(generated_ids), total_attempted, success_rate * 100)
             return result
 

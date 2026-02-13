@@ -1,1 +1,1 @@
-"""IsoCrates MCP Server — query documentation from AI editors."""
+"""IsoCrates MCP Server: query documentation from AI editors."""

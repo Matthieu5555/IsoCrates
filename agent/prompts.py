@@ -2,13 +2,13 @@
 
 This module contains all static data used across the agent pipeline:
 prompt fragments, scout definitions, focus patterns, and tuning constants.
-No runtime logic — pure data only.
+No runtime logic -- pure data only.
 """
 
 import re
 
 # ---------------------------------------------------------------------------
-# Document Type Taxonomy (used for fallback and keyword tagging only —
+# Document Type Taxonomy (used for fallback and keyword tagging only --
 # the planner is free to create any page structure it wants)
 # ---------------------------------------------------------------------------
 
@@ -68,7 +68,7 @@ EXISTING_SUMMARY_TRUNCATION: int = 3000
 
 # Wall-clock timeout (seconds) for a single writer conversation.
 # The LLM timeout is 900s per request, but a conversation may make many
-# requests — this caps total elapsed time.  100 iterations ≈ 15 min at
+# requests -- this caps total elapsed time.  100 iterations ≈ 15 min at
 # typical LLM latency; 600s is a safe ceiling.
 WRITER_CONVERSATION_TIMEOUT: int = 600
 
@@ -82,23 +82,23 @@ SCOUT_CONVERSATION_TIMEOUT: int = 300
 # ---------------------------------------------------------------------------
 
 PROSE_REQUIREMENTS: str = """
-WRITING STYLE (ABSOLUTELY MANDATORY — HARD FAILURE IF VIOLATED):
+WRITING STYLE (ABSOLUTELY MANDATORY -- HARD FAILURE IF VIOLATED):
 
 Write professional, concise technical documentation. Each page should be
-SHORT — 1-2 printed pages maximum. Think wiki page, not book chapter.
+SHORT -- 1-2 printed pages maximum. Think wiki page, not book chapter.
 
 Use flowing prose paragraphs of 2-4 sentences. Use transition words to
 connect ideas. Code blocks and tables are acceptable but surround them
 with brief explanatory prose.
 
-BULLET POINTS AND DASHES ARE BANNED. This is not a suggestion — it is an
+BULLET POINTS AND DASHES ARE BANNED. This is not a suggestion -- it is an
 absolute rule. Do NOT use bullet points (-, *, •) for descriptions,
 explanations, feature lists, comparisons, summaries, or ANY other purpose.
 Weave items into sentences and paragraphs. If you catch yourself reaching
 for a bullet point, rewrite it as prose. Tables are the alternative for
 structured data, prose paragraphs for everything else.
 
-THE ONLY EXCEPTION — and it is extremely narrow — is numbered lists (1. 2. 3.)
+THE ONLY EXCEPTION -- and it is extremely narrow -- is numbered lists (1. 2. 3.)
 for sequential steps where ALL of the following conditions are true:
   1. The page is a quickstart, getting-started, or how-to guide
   2. Each step is a concrete ACTION the reader must perform in order
@@ -108,11 +108,11 @@ for sequential steps where ALL of the following conditions are true:
 If even one of these conditions is false, use prose. "First, install the
 dependencies with `npm install`. Next, configure the environment by copying
 `.env.example` to `.env`." is always acceptable and often reads better than
-a numbered list. When in doubt, use prose — numbered lists are a last resort
+a numbered list. When in doubt, use prose -- numbered lists are a last resort
 for genuinely sequential procedures, not a formatting convenience.
 
-Violating this rule — using bullet points anywhere, or using numbered lists
-outside of sequential procedures in quickstart/guide pages — is a hard
+Violating this rule -- using bullet points anywhere, or using numbered lists
+outside of sequential procedures in quickstart/guide pages -- is a hard
 failure that invalidates the entire page.
 
 If a topic is too large for 1-2 pages, split it into sub-pages and link
@@ -126,7 +126,7 @@ GFM TABLES (use when they aid comprehension):
 Use GitHub-Flavored Markdown tables for structured data: endpoint summaries,
 config options, comparison matrices, dependency lists, component tables.
 Every table needs a header row and separator (|---|---|).
-Not every page needs a table — use them where they genuinely help.
+Not every page needs a table -- use them where they genuinely help.
 """
 
 DIAGRAM_REQUIREMENTS: str = """
@@ -138,13 +138,13 @@ Use ```mermaid code blocks. Choose the right type:
   stateDiagram-v2: for stateful entities
   erDiagram: for data models
 
-Include a brief caption sentence. Not every page needs a diagram — use
+Include a brief caption sentence. Not every page needs a diagram -- use
 them on architecture, flow, and data model pages where they genuinely
 clarify relationships.
 """
 
 MERMAID_FIX_PROMPT: str = """Your document has {count} mermaid diagram(s) with syntax errors that will
-not render on the frontend. Fix ONLY the broken diagrams listed below —
+not render on the frontend. Fix ONLY the broken diagrams listed below --
 do not change any other content in the document.
 
 {error_details}
@@ -160,7 +160,7 @@ WIKILINKS (THIS IS THE MOST IMPORTANT REQUIREMENT):
 Use [[Page Title]] syntax to build a densely interconnected knowledge graph.
 Wikilinks are what make this feel like a human-crafted wiki, not AI output.
 
-INLINE WIKILINKS — EMBEDDED NATURALLY IN PROSE (this is the primary form):
+INLINE WIKILINKS -- EMBEDDED NATURALLY IN PROSE (this is the primary form):
   Weave links into sentences where a reader would naturally want to drill
   deeper. Examples of GOOD inline wikilinks:
     "The [[Document Service]] validates input before delegating to the
@@ -171,8 +171,8 @@ INLINE WIKILINKS — EMBEDDED NATURALLY IN PROSE (this is the primary form):
      database queries behind a clean interface."
 
   BAD wikilinks (don't do this):
-    "See [[Architecture]] for more." — lazy, tells the reader nothing
-    "Related: [[X]], [[Y]], [[Z]]" — dumping links without context
+    "See [[Architecture]] for more." -- lazy, tells the reader nothing
+    "Related: [[X]], [[Y]], [[Z]]" -- dumping links without context
 
   The key test: would a human editor naturally hyperlink this word?
   If the reader would think "what's that?" or "tell me more", it's a link.
@@ -188,21 +188,21 @@ DO NOT ADD A "SEE ALSO" SECTION. EVER.
   No "## See Also", no "Related pages", no link dump at the bottom.
   Every wikilink must be INLINE in prose where it's contextually relevant.
   If a connection matters, it belongs in a sentence. If it doesn't fit
-  naturally in a sentence, it's not a real connection — don't force it.
+  naturally in a sentence, it's not a real connection -- don't force it.
   The dependency graph must reflect genuine relationships, not padding.
 
 EXTERNAL LINKS vs WIKILINKS:
   Use [[Page Title]] ONLY for pages that exist in this wiki (listed in the
-  sibling pages section below). For external resources — frameworks, libraries,
-  third-party tools, specifications — use standard markdown link syntax:
+  sibling pages section below). For external resources -- frameworks, libraries,
+  third-party tools, specifications -- use standard markdown link syntax:
   [display text](https://url).
 
   Examples:
     GOOD: "The [[Document Service]] validates input before persistence."
     GOOD: "Built on [FastAPI](https://fastapi.tiangolo.com/) for the backend."
     GOOD: "Uses the [OpenHands SDK](https://docs.all-hands.dev/) for agent orchestration."
-    BAD:  "Built on [[FastAPI]] for the backend." — FastAPI is not a wiki page
-    BAD:  "Uses the [[OpenHands SDK]] for orchestration." — external, not a wiki page
+    BAD:  "Built on [[FastAPI]] for the backend." -- FastAPI is not a wiki page
+    BAD:  "Uses the [[OpenHands SDK]] for orchestration." -- external, not a wiki page
 
   RULE: If the concept is NOT in the list of wiki pages provided to you,
   it MUST be a standard markdown link [text](url) with an actual URL.
@@ -210,12 +210,12 @@ EXTERNAL LINKS vs WIKILINKS:
 """
 
 DESCRIPTION_REQUIREMENTS: str = """
-DESCRIPTION (MUST include in bottomatter — CRITICAL):
+DESCRIPTION (MUST include in bottomatter -- CRITICAL):
 
 After writing the page, write a 2-3 sentence description of what THIS page
 covers. The description MUST mention the page title ("{title}") or its core
 topic. This description is stored in the database and used by MCP tools,
-semantic search, and document listings — it must accurately reflect the
+semantic search, and document listings -- it must accurately reflect the
 CONTENT YOU WROTE, not content from other pages or scout reports.
 
 WRONG: "This page covers the Next.js frontend architecture..." (if this page is about the agent pipeline)
@@ -249,12 +249,12 @@ source files you actually read and used to write this page. Format as a table:
 | `src/models/document.py` | SQLAlchemy model and column definitions |
 
 RULES:
-  Only list files you genuinely read and extracted information from — not
+  Only list files you genuinely read and extracted information from -- not
   every file in key_files_to_read. If you read a file but it wasn't useful,
   omit it. The purpose column should be a brief phrase (not a sentence)
   explaining what information you took from that file.
 
-  Use relative paths from the repository root. Keep the table compact — 3-10
+  Use relative paths from the repository root. Keep the table compact -- 3-10
   files is typical. This section helps readers trace documentation back to
   the code it describes.
 """
@@ -263,7 +263,7 @@ SELF_CONTAINED_REQUIREMENTS: str = """
 SELF-CONTAINED PAGES (every page must stand alone):
 
 Every page in this wiki must be independently understandable. Readers arrive
-via search, MCP tool retrieval, or direct wikilink — they have NOT read any
+via search, MCP tool retrieval, or direct wikilink -- they have NOT read any
 other page first.
 
 RULES:
@@ -273,8 +273,8 @@ RULES:
 
   When referencing a concept from another page, provide a brief inline
   definition (one sentence) BEFORE the wikilink. Example:
-    GOOD: "The system uses the repository pattern — a data access
-           abstraction that decouples business logic from storage — as
+    GOOD: "The system uses the repository pattern -- a data access
+           abstraction that decouples business logic from storage -- as
            implemented in the [[Document Repository]]."
     BAD:  "The system uses the repository pattern (see [[Document Repository]])."
 
@@ -285,7 +285,7 @@ RULES:
   or terminology without brief inline explanation on first use.
 
   Wikilinks are navigation aids, not substitutes for explanation. A wikilink
-  supplements a sentence — it never replaces the information the reader
+  supplements a sentence -- it never replaces the information the reader
   needs to understand THIS page.
 """
 
@@ -306,7 +306,7 @@ SCOUT_DEFINITIONS: dict[str, dict[str, object]] = {
 DO THIS:
 1. Read README.md (or README.rst, README.txt) if it exists
 2. Read package metadata files marked with ★ above (pyproject.toml, package.json, Cargo.toml, etc.)
-3. Note the directory layout from the manifest above — do NOT run `find` or `ls`
+3. Note the directory layout from the manifest above -- do NOT run `find` or `ls`
 
 Write your report to /tmp/scout_report_structure.md with this format:
 
@@ -368,7 +368,7 @@ Be thorough but concise. Facts only, no opinions.""",
 {constraints}
 
 DO THIS:
-1. Read ★-marked files — these likely contain route/endpoint/schema definitions
+1. Read ★-marked files -- these likely contain route/endpoint/schema definitions
 2. Use grep to find route definitions if needed: grep -rn "@app\\|@router\\|HandleFunc" --include="*.py" --include="*.ts" --include="*.go" . | head -30
 3. Read API route files to understand endpoint signatures (check sizes first!)
 4. Look for OpenAPI/Swagger specs, GraphQL schemas, or protobuf definitions
@@ -401,7 +401,7 @@ Be thorough but concise. Facts only, no opinions.""",
 {constraints}
 
 DO THIS:
-1. Read ★-marked files — these are the infrastructure and config files
+1. Read ★-marked files -- these are the infrastructure and config files
 2. Read Dockerfile(s), docker-compose.yml if present
 3. Read CI/CD configs (.github/workflows/, etc.)
 4. Read .env.example or .env.template if present
@@ -434,7 +434,7 @@ Be thorough but concise. Facts only, no opinions.""",
 {constraints}
 
 DO THIS:
-1. Review ★-marked files — these are test files and test configs
+1. Review ★-marked files -- these are test files and test configs
 2. Read 2-3 test files to understand patterns (check sizes first!)
 3. Look for test configuration in the manifest: pytest.ini, jest.config.*, conftest.py
 4. Check for linting/formatting configs: .eslintrc, ruff.toml, pyproject.toml [tool.ruff]

@@ -2,9 +2,12 @@
 """
 Convert existing docs from frontmatter to bottomatter format.
 """
+import logging
 import re
 from pathlib import Path
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 def convert_document(file_path):
     """Convert a document from frontmatter to bottomatter."""
@@ -12,13 +15,13 @@ def convert_document(file_path):
 
     # Parse frontmatter
     if not content.startswith("---\n"):
-        print(f"No frontmatter in {file_path}")
+        logger.info("No frontmatter in %s", file_path)
         return
 
     # Extract frontmatter
     end_match = re.search(r'\n---\n', content[4:])
     if not end_match:
-        print(f"Malformed frontmatter in {file_path}")
+        logger.warning("Malformed frontmatter in %s", file_path)
         return
 
     end_pos = end_match.end() + 4
@@ -38,7 +41,7 @@ def convert_document(file_path):
         try:
             dt = datetime.fromisoformat(generated_at)
             timestamp = dt.strftime("%d/%m/%Y at %I:%M%p")
-        except:
+        except Exception:
             timestamp = "Unknown Date"
     else:
         timestamp = "Unknown Date"
@@ -65,13 +68,13 @@ def convert_document(file_path):
 
     # Write back
     Path(file_path).write_text(new_content)
-    print(f"Converted: {file_path}")
-    print(f"  Header: {timestamp}")
-    print(f"  Metadata keys: {list(metadata.keys())}")
+    logger.info("Converted: %s", file_path)
+    logger.info("  Header: %s", timestamp)
+    logger.info("  Metadata keys: %s", list(metadata.keys()))
 
 # Convert main docs
 for doc_file in ['/notes/DerivativesGPT-client.md', '/notes/DerivativesGPT-softdev.md']:
     if Path(doc_file).exists():
         convert_document(doc_file)
 
-print("\nDone!")
+logger.info("Done!")

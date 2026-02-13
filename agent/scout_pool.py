@@ -111,7 +111,7 @@ class ScoutPool:
         total = len(scout_tasks)
         reports: dict[str, str] = {}
 
-        print(f"[ScoutPool] Running {total} scouts (max {max_workers} parallel)...")
+        logger.info("Running %d scouts (max %d parallel)...", total, max_workers)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
@@ -125,7 +125,7 @@ class ScoutPool:
                 try:
                     key, report_text = future.result()
                     reports[key] = report_text
-                    print(f"   [ScoutPool] {key}: {len(report_text)} chars")
+                    logger.info("Scout %s: %d chars", key, len(report_text))
                 except Exception as e:
                     logger.error("Scout thread failed for %s: %s", task_key, e)
                     reports[task_key] = (

@@ -75,7 +75,7 @@ class TestCircuitBreakerStates:
         cb.record_failure()
         assert cb.state == CircuitState.OPEN
         time.sleep(0.02)
-        cb.check()  # Should not raise — transitions to HALF_OPEN
+        cb.check()  # Should not raise -- transitions to HALF_OPEN
         assert cb.state == CircuitState.HALF_OPEN
 
     def test_half_open_closes_on_success(self):

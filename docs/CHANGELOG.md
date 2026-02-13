@@ -408,7 +408,7 @@ Incremental improvements that led to the major refactoring completed later.
 
 **Algorithm Documentation.** Added comprehensive docstrings to `TreeService._build_folder_tree()` and `TreeService._dict_to_tree_nodes()` explaining data structures, recursive logic, and example input/output.
 
-**Migration Script Documented.** In `backend/scripts/migrate_to_hierarchical.py`, documented columns added, default values, and idempotency.
+**Migration Script Documented.** In `backend/migrate_crate_to_path.py`, documented columns added, default values, and idempotency.
 
 ### Impact
 

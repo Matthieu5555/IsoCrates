@@ -1,7 +1,7 @@
 """Integration tests for the documentation generation pipeline.
 
 Tests the contract between writer agents, file finder, content cleaner,
-and API posting. All LLM/agent calls are mocked — zero credits spent.
+and API posting. All LLM/agent calls are mocked -- zero credits spent.
 """
 
 import re
@@ -22,7 +22,7 @@ from tests.fixtures import (
 
 
 # ---------------------------------------------------------------------------
-# File finder tests — the $20 bug
+# File finder tests -- the $20 bug
 # ---------------------------------------------------------------------------
 
 class TestWriterOutputResolution:
@@ -104,7 +104,7 @@ class TestWriterBrief:
     """The brief sent to the writer agent must use correct paths."""
 
     def test_brief_uses_workspace_relative_path(self, generator):
-        """Brief must NOT contain absolute paths — only workspace-relative."""
+        """Brief must NOT contain absolute paths -- only workspace-relative."""
         gen, MockConv, workspace, notes = generator
         doc_spec = SAMPLE_BLUEPRINT["documents"][1]  # Backend Architecture
 
@@ -345,7 +345,7 @@ class TestGenerateAllFlow:
 
 
 # ---------------------------------------------------------------------------
-# Writer description tests — description fallback chain
+# Writer description tests -- description fallback chain
 # ---------------------------------------------------------------------------
 
 class TestWriterDescription:

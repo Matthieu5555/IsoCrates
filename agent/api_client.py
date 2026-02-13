@@ -155,7 +155,7 @@ class DocumentAPIClient:
             response.raise_for_status()
             return response.json()["doc_id"]
         except requests.exceptions.RequestException as exc:
-            logger.warning("generate_doc_id API call failed: %s — using local fallback", exc)
+            logger.warning("generate_doc_id API call failed: %s, using local fallback", exc)
             return self._generate_doc_id_local(repo_url, path, title, doc_type)
 
     @staticmethod

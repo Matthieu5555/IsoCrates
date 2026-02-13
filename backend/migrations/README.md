@@ -11,8 +11,8 @@ SQL migrations for the IsoCrates PostgreSQL database. The migration runner (`app
 ## File naming
 
 ```
-{version}_{name}.sql          — universal migration
-{version}_{name}.sql           — with "-- dialect: postgresql" on line 1 for PG-only
+{version}_{name}.sql          - universal migration
+{version}_{name}.sql           - with "-- dialect: postgresql" on line 1 for PG-only
 ```
 
 Version is a 3-digit zero-padded number (e.g., `001`, `014`). Files are applied in version order.
@@ -39,4 +39,4 @@ pg_dump -U isocrates isocrates > backup_$(date +%Y%m%d).sql
 
 1. Create `{next_version}_{descriptive_name}.sql` in this directory
 2. Add `-- dialect: postgresql` on line 1 if PG-specific syntax is used
-3. Restart the backend — the migration will be applied automatically
+3. Restart the backend - the migration will be applied automatically

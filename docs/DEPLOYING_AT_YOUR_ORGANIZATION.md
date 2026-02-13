@@ -314,7 +314,7 @@ Migrations are applied automatically on startup by the built-in migrator (`backe
 
 ## 11. Customizing Documentation Style
 
-The documentation the agent produces (its writing style, page structure, diagram usage, wikilink density) is controlled entirely by prompt constants in `agent/prompts.py` and prompt templates in `agent/planner.py`. These are designed to be edited without touching any pipeline logic. For a complete walkthrough of what each prompt controls and how to modify it safely, see [`docs/PROMPT_ENGINEERING.md`](../docs/PROMPT_ENGINEERING.md).
+The documentation the agent produces (its writing style, page structure, diagram usage, wikilink density) is controlled entirely by prompt constants in `agent/prompts.py` and prompt templates in `agent/planner.py`. These are designed to be edited without touching any pipeline logic. For a complete walkthrough of what each prompt controls and how to modify it safely, see [`PROMPT_ENGINEERING.md`](PROMPT_ENGINEERING.md).
 
 ---
 

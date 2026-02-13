@@ -147,8 +147,9 @@ class WriterPool:
             """Run a single writer in a thread with retry. Returns (title, result)."""
             title = doc_spec["title"]
             for attempt in range(1, max_attempts + 1):
-                print(f"\n[{idx}/{total}] Dispatching writer for: {title}"
-                      + (f" (attempt {attempt})" if attempt > 1 else ""))
+                logger.info("[%d/%d] Dispatching writer for: %s%s",
+                            idx, total, title,
+                            f" (attempt {attempt})" if attempt > 1 else "")
                 result = generate_fn(doc_spec, agent)
                 status = result.get("status", "")
                 if status not in ("error", "error_fallback", "warning"):
@@ -160,17 +161,15 @@ class WriterPool:
                         "Writer for %s failed (attempt %d/%d), retrying in %ds: %s",
                         title, attempt, max_attempts, wait, result.get("error", "unknown"),
                     )
-                    print(f"   [Retry] Writer for {title} failed, retrying in {wait}s...")
+                    logger.warning("Writer for %s failed, retrying in %ds...", title, wait)
                     time.sleep(wait)
                     agent = self.create_writer_agent()
             return title, result
 
         # Wave 1: Detail pages in parallel
         if detail_docs:
-            print(
-                f"\n[Wave 1] {len(detail_docs)} detail pages "
-                f"(max {max_workers} parallel)..."
-            )
+            logger.info("Wave 1: %d detail pages (max %d parallel)...",
+                        len(detail_docs), max_workers)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {}
                 for idx, doc_spec in enumerate(detail_docs, 1):
@@ -206,10 +205,8 @@ class WriterPool:
         # resolved at upload time, not generation time.
         if hub_docs:
             offset = len(detail_docs)
-            print(
-                f"\n[Wave 2] {len(hub_docs)} hub pages "
-                f"(max {max_workers} parallel, after detail pages)..."
-            )
+            logger.info("Wave 2: %d hub pages (max %d parallel, after detail pages)...",
+                        len(hub_docs), max_workers)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {}
                 for idx, doc_spec in enumerate(hub_docs, offset + 1):

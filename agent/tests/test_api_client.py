@@ -1,7 +1,7 @@
 """Tests for the DocumentAPIClient.
 
 Verifies retry logic, filesystem fallback, field validation, and
-error handling — all with mocked HTTP via the responses library.
+error handling -- all with mocked HTTP via the responses library.
 """
 
 from pathlib import Path

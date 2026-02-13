@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger("isocrates.agent.circuit_breaker")
 
-# Defaults — can be overridden per instance.
+# Defaults -- can be overridden per instance.
 DEFAULT_FAILURE_THRESHOLD = 3    # consecutive failures before opening
 DEFAULT_COOLDOWN_SECONDS = 60    # seconds to wait before half-open probe
 
@@ -113,7 +113,7 @@ class CircuitBreaker:
 
 
 # ---------------------------------------------------------------------------
-# Global registry — one breaker per model endpoint
+# Global registry -- one breaker per model endpoint
 # ---------------------------------------------------------------------------
 
 _breakers: dict[str, CircuitBreaker] = {}

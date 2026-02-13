@@ -259,7 +259,7 @@ if __name__ == "__main__":
     # Test ID generation
     repo_url = "https://github.com/django/django"
     doc_id = generate_doc_id(repo_url, "client")
-    print(f"Generated ID: {doc_id}")
+    logger.info("Generated ID: %s", doc_id)
 
     # Test document creation
     content = "# Django\n\nDjango is a web framework..."
@@ -270,8 +270,7 @@ if __name__ == "__main__":
         doc_type="client",
         collection="backend"
     )
-    print("\nDocument with metadata:")
-    print(doc_with_metadata[:500])
+    logger.info("Document with metadata:\n%s", doc_with_metadata[:500])
 
     # Test registry
     registry = DocumentRegistry()
@@ -281,7 +280,7 @@ if __name__ == "__main__":
         doc_type="client",
         file_path="/notes/backend/django-client.md"
     )
-    print(f"\nRegistered document: {doc_id}")
+    logger.info("Registered document: %s", doc_id)
 
     found = registry.find_document(doc_id)
-    print(f"Found in registry: {found}")
+    logger.info("Found in registry: %s", found)
