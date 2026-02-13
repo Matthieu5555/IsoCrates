@@ -5,11 +5,14 @@ Implements decision logic to respect human edits while keeping
 AI-generated documentation fresh.
 """
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 from api_client import DocumentAPIClient
 from repo_monitor import has_significant_changes, get_repo_unchanged_status
+
+logger = logging.getLogger("isocrates.agent")
 
 
 class VersionPriorityEngine:
@@ -55,9 +58,9 @@ class VersionPriorityEngine:
         Returns:
             Tuple of (should_regenerate: bool, reason: str)
         """
-        print(f"\n[VersionPriority] Checking if regeneration needed...")
-        print(f"   Doc ID: {doc_id}")
-        print(f"   Current commit: {current_commit_sha[:8]}")
+        logger.info("[VersionPriority] Checking if regeneration needed...")
+        logger.info("   Doc ID: %s", doc_id)
+        logger.info("   Current commit: %s", current_commit_sha[:8])
 
         # Rule 1: Check if document exists
         existing_doc = self.api_client.get_document(doc_id)
@@ -70,7 +73,7 @@ class VersionPriorityEngine:
         if not content or not content.strip():
             return True, "Existing document is empty (failed previous generation)"
 
-        print(f"   Found existing document")
+        logger.info("   Found existing document")
 
         # Get version history
         versions = self.api_client.get_document_versions(doc_id)
@@ -84,25 +87,27 @@ class VersionPriorityEngine:
         author_type = latest_version.get("author_type", "ai")
         created_at_str = latest_version.get("created_at")
 
-        print(f"   Latest version author: {author_type}")
-        print(f"   Latest version created: {created_at_str}")
+        logger.info("   Latest version author: %s", author_type)
+        logger.info("   Latest version created: %s", created_at_str)
 
         # Parse creation timestamp
+        if not created_at_str:
+            return True, "No timestamp on latest version, regenerating to be safe"
         try:
             created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
             age_days = (datetime.now(created_at.tzinfo) - created_at).days
         except (ValueError, AttributeError) as e:
-            print(f"[VersionPriority] Warning: Could not parse timestamp: {e}")
+            logger.warning("[VersionPriority] Could not parse timestamp: %s", e)
             # Can't determine age - regenerate to be safe
             return True, "Cannot determine document age, regenerating to be safe"
 
-        print(f"   Document age: {age_days} days")
+        logger.info("   Document age: %s days", age_days)
 
         # Get last commit SHA from metadata
         author_metadata = latest_version.get("author_metadata", {})
         last_commit_sha = author_metadata.get("repo_commit_sha", "unknown")
 
-        print(f"   Last documented commit: {last_commit_sha[:8] if last_commit_sha != 'unknown' else 'unknown'}")
+        logger.info("   Last documented commit: %s", last_commit_sha[:8] if last_commit_sha != "unknown" else "unknown")
 
         # Check repo changes
         if last_commit_sha != "unknown":
@@ -110,11 +115,11 @@ class VersionPriorityEngine:
                 self.repo_path,
                 last_commit_sha
             )
-            print(f"   Repo status: {change_reason}")
+            logger.info("   Repo status: %s", change_reason)
         else:
             is_unchanged = False
             change_reason = "Previous commit SHA unknown, assuming changes"
-            print(f"   Repo status: {change_reason}")
+            logger.info("   Repo status: %s", change_reason)
 
         # Apply decision rules based on author type
         if author_type == "human":

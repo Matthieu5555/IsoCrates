@@ -139,12 +139,16 @@ def validate_mermaid_blocks(
         for i, (_, source) in enumerate(blocks)
     ])
 
-    # Write the validation script into the frontend directory so Node ESM
-    # resolves the mermaid import from frontend/node_modules (ESM uses the
-    # script's location for package resolution, not cwd).
+    # Write the validation script to a temp file inside the frontend directory
+    # so Node ESM resolves the mermaid import from frontend/node_modules (ESM
+    # uses the script's location for package resolution, not cwd).
+    import tempfile
+    script_path = None
     try:
-        script_path = str(resolved / ".mermaid_validate.mjs")
-        with open(script_path, "w") as f:
+        fd, script_path = tempfile.mkstemp(
+            suffix=".mjs", prefix=".mermaid_validate_", dir=str(resolved)
+        )
+        with os.fdopen(fd, "w") as f:
             f.write(_VALIDATE_SCRIPT)
 
         result = subprocess.run(
@@ -170,10 +174,11 @@ def validate_mermaid_blocks(
         logger.warning("[Mermaid] Validation failed: %s", e)
         return []
     finally:
-        try:
-            os.unlink(script_path)
-        except OSError:
-            pass
+        if script_path:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
 
     # Map raw errors back to MermaidError with line numbers and source
     errors: list[MermaidError] = []

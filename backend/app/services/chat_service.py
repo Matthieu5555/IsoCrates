@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..core.config import settings
 from ..repositories.document_repository import DocumentRepository
+from ..schemas.document import AskResponse, ChatSource
 from .embedding_service import EmbeddingService
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ class ChatService:
         question: str,
         top_k: int = 5,
         allowed_prefixes: list[str] | None = None,
-    ) -> dict:
+    ) -> AskResponse:
         """Answer a question using RAG.
 
         1. Retrieve relevant docs via FTS + semantic search
@@ -73,11 +74,11 @@ class ChatService:
             {"answer": str, "sources": [{"title", "id", "path"}], "model": str}
         """
         if not self.is_configured():
-            return {
-                "answer": "Chat is not configured. Set CHAT_MODEL and either CHAT_API_KEY or EMBEDDING_API_KEY.",
-                "sources": [],
-                "model": "",
-            }
+            return AskResponse(
+                answer="Chat is not configured. Set CHAT_MODEL and either CHAT_API_KEY or EMBEDDING_API_KEY.",
+                sources=[],
+                model="",
+            )
 
         # --- Retrieval ---
         docs_by_id: dict[str, dict] = {}
@@ -106,8 +107,8 @@ class ChatService:
                         doc = self.doc_repo.get_by_id(doc_id)
                         if doc:
                             _add_doc(doc)
-            except Exception:
-                logger.warning("Semantic search failed, falling back to FTS only")
+            except (ValueError, RuntimeError, ConnectionError, OSError) as e:
+                logger.warning("Semantic search failed, falling back to FTS only: %s", e)
 
         # FTS search with individual keywords (OR-style: search each term separately)
         terms = _extract_search_terms(question)
@@ -125,19 +126,19 @@ class ChatService:
                         doc = self.doc_repo.get_by_id(result.id)
                         if doc:
                             _add_doc(doc)
-            except Exception:
-                logger.warning("FTS search failed for term %r", term, exc_info=True)
+            except (ValueError, RuntimeError, OSError) as e:
+                logger.warning("FTS search failed for term %r: %s", term, e)
                 continue
 
         # Limit to top_k total
         context_docs = list(docs_by_id.values())[:top_k]
 
         if not context_docs:
-            return {
-                "answer": "No relevant documentation found for this question.",
-                "sources": [],
-                "model": settings.chat_model,
-            }
+            return AskResponse(
+                answer="No relevant documentation found for this question.",
+                sources=[],
+                model=settings.chat_model,
+            )
 
         # --- Build context ---
         context_parts = []
@@ -179,17 +180,17 @@ class ChatService:
             answer = response.choices[0].message.content
         except Exception as e:
             logger.exception("Chat completion failed")
-            return {
-                "answer": "Unable to generate an answer right now. Please try again later.",
-                "sources": [{"title": d["title"], "id": d["id"], "path": d["path"]} for d in context_docs],
-                "model": settings.chat_model,
-            }
+            return AskResponse(
+                answer="Unable to generate an answer right now. Please try again later.",
+                sources=[ChatSource(id=d["id"], title=d["title"], path=d["path"]) for d in context_docs],
+                model=settings.chat_model,
+            )
 
-        return {
-            "answer": answer,
-            "sources": [
-                {"title": d["title"], "id": d["id"], "path": d["path"]}
+        return AskResponse(
+            answer=answer,
+            sources=[
+                ChatSource(id=d["id"], title=d["title"], path=d["path"])
                 for d in context_docs
             ],
-            "model": settings.chat_model,
-        }
+            model=settings.chat_model,
+        )

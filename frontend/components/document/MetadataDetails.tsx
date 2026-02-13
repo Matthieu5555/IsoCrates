@@ -19,6 +19,7 @@ import { KEYWORD_PRESETS } from '@/lib/config/constants';
 interface MetadataDetailsProps {
   document: Document;
   onDocumentUpdate?: (doc: Document) => void;
+  readOnly?: boolean;
 }
 
 function formatDateTime(dateString: string): string {
@@ -30,7 +31,7 @@ function formatDateTime(dateString: string): string {
   });
 }
 
-export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsProps) {
+export function MetadataDetails({ document, onDocumentUpdate, readOnly = false }: MetadataDetailsProps) {
   const [mounted, setMounted] = useState(false);
   const [showKeywordPicker, setShowKeywordPicker] = useState(false);
   const [customKeyword, setCustomKeyword] = useState('');
@@ -55,8 +56,9 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
       onDocumentUpdate?.(updated);
       setCustomKeyword('');
       setShowKeywordPicker(false);
-    } catch {
-      toast.error('Failed to update keywords');
+    } catch (err: unknown) {
+      console.error('Failed to add keyword:', err);
+      toast.error('Failed to update keywords', err instanceof Error ? err.message : undefined);
     }
   }
 
@@ -64,8 +66,9 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
     try {
       const updated = await updateDocumentKeywords(document.id, keywords.filter(k => k !== keyword));
       onDocumentUpdate?.(updated);
-    } catch {
-      toast.error('Failed to update keywords');
+    } catch (err: unknown) {
+      console.error('Failed to remove keyword:', err);
+      toast.error('Failed to update keywords', err instanceof Error ? err.message : undefined);
     }
   }
 
@@ -75,7 +78,8 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
     try {
       const job = await triggerGeneration(document.repo_url);
       toast.success('Generation queued', `Job ${job.id.slice(0, 8)} queued. Check back shortly.`);
-    } catch {
+    } catch (err: unknown) {
+      console.error('Failed to trigger generation:', err);
       toast.error('Failed to trigger generation', 'Check that the worker is running.');
     } finally {
       setIsRegenerating(false);
@@ -87,8 +91,9 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
       const updated = await updateDocumentDescription(document.id, descriptionDraft.trim());
       onDocumentUpdate?.(updated);
       setEditingDescription(false);
-    } catch {
-      toast.error('Failed to update description');
+    } catch (err: unknown) {
+      console.error('Failed to update description:', err);
+      toast.error('Failed to update description', err instanceof Error ? err.message : undefined);
     }
   }
 
@@ -97,8 +102,9 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
       const updated = await updateDocumentRepo(document.id, repoUrl.trim());
       onDocumentUpdate?.(updated);
       setEditingRepo(false);
-    } catch {
-      toast.error('Failed to update repository');
+    } catch (err: unknown) {
+      console.error('Failed to update repository:', err);
+      toast.error('Failed to update repository', err instanceof Error ? err.message : undefined);
     }
   }
 
@@ -112,7 +118,7 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
           <tr className={tableVariants.row}>
             <td className={`${tableVariants.cell} font-medium text-muted-foreground align-top`}>Description</td>
             <td className={tableVariants.cell}>
-              {editingDescription ? (
+              {!readOnly && editingDescription ? (
                 <div className="flex flex-col gap-2">
                   <textarea
                     value={descriptionDraft}
@@ -141,13 +147,15 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
                   ) : (
                     <span className={`${textVariants.mutedXs} italic`}>No description</span>
                   )}
-                  <button
-                    onClick={() => setEditingDescription(true)}
-                    className={`${buttonVariants.icon} !p-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-0.5`}
-                    title="Edit description"
-                  >
-                    <Edit2 className="h-3.5 w-3.5" />
-                  </button>
+                  {!readOnly && (
+                    <button
+                      onClick={() => setEditingDescription(true)}
+                      className={`${buttonVariants.icon} !p-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 mt-0.5`}
+                      title="Edit description"
+                    >
+                      <Edit2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
               )}
             </td>
@@ -161,16 +169,18 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
                 {keywords.map(kw => (
                   <span key={kw} className={badgeVariants.keyword}>
                     {kw}
-                    <button
-                      onClick={() => handleRemoveKeyword(kw)}
-                      className="hover:text-destructive ml-0.5"
-                      title={`Remove "${kw}"`}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
+                    {!readOnly && (
+                      <button
+                        onClick={() => handleRemoveKeyword(kw)}
+                        className="hover:text-destructive ml-0.5"
+                        title={`Remove "${kw}"`}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    )}
                   </span>
                 ))}
-                <div className="relative">
+                {!readOnly && <div className="relative">
                   <button
                     onClick={() => setShowKeywordPicker(!showKeywordPicker)}
                     className={badgeVariants.keywordAdd}
@@ -209,7 +219,7 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
                       </form>
                     </div>
                   )}
-                </div>
+                </div>}
                 {keywords.length === 0 && !showKeywordPicker && (
                   <span className={`${textVariants.mutedXs} italic`}>No keywords</span>
                 )}
@@ -221,7 +231,7 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
           <tr className={tableVariants.row}>
             <td className={`${tableVariants.cell} font-medium text-muted-foreground`}>Git Repository</td>
             <td className={tableVariants.cell}>
-              {editingRepo ? (
+              {!readOnly && editingRepo ? (
                 <div className="flex items-center gap-2">
                   <input
                     type="url"
@@ -248,22 +258,26 @@ export function MetadataDetails({ document, onDocumentUpdate }: MetadataDetailsP
                   ) : (
                     <span className={`${textVariants.mutedXs} italic`}>Not set</span>
                   )}
-                  <button
-                    onClick={() => setEditingRepo(true)}
-                    className={`${buttonVariants.icon} !p-1 opacity-0 group-hover:opacity-100 transition-opacity`}
-                    title="Edit repository URL"
-                  >
-                    <Edit2 className="h-3.5 w-3.5" />
-                  </button>
-                  {document.repo_url && (
-                    <button
-                      onClick={handleRegenerate}
-                      disabled={isRegenerating}
-                      className={`${buttonVariants.icon} !p-1 opacity-0 group-hover:opacity-100 transition-opacity`}
-                      title="Regenerate documentation for this repository"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
-                    </button>
+                  {!readOnly && (
+                    <>
+                      <button
+                        onClick={() => setEditingRepo(true)}
+                        className={`${buttonVariants.icon} !p-1 opacity-0 group-hover:opacity-100 transition-opacity`}
+                        title="Edit repository URL"
+                      >
+                        <Edit2 className="h-3.5 w-3.5" />
+                      </button>
+                      {document.repo_url && (
+                        <button
+                          onClick={handleRegenerate}
+                          disabled={isRegenerating}
+                          className={`${buttonVariants.icon} !p-1 opacity-0 group-hover:opacity-100 transition-opacity`}
+                          title="Regenerate documentation for this repository"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               )}

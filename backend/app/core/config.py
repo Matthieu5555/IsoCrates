@@ -81,6 +81,10 @@ class Settings(BaseSettings):
         default=False,
         description="Enable JWT authentication (False for development)"
     )
+    public_read: bool = Field(
+        default=False,
+        description="Allow anonymous read access to all documents (requires AUTH_ENABLED=true)"
+    )
 
     # Audit Log Retention
     audit_retention_days: int = Field(

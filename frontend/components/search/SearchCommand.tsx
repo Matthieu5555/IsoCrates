@@ -161,6 +161,7 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={useSemantic ? "Semantic search (find similar)..." : "Search documentation..."}
                 className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                aria-label="Search documentation"
                 autoFocus
               />
             </div>
@@ -298,10 +299,9 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
                             {doc.description}
                           </p>
                         ) : snippet ? (
-                          <p
-                            className="text-xs text-muted-foreground line-clamp-2"
-                            dangerouslySetInnerHTML={{ __html: snippet.replace(/<(?!\/?mark\b)[^>]*>/gi, '') }}
-                          />
+                          <p className="text-xs text-muted-foreground line-clamp-2">
+                            {snippet.replace(/<\/?[^>]+(>|$)/g, '')}
+                          </p>
                         ) : doc.content_preview ? (
                           <p className="text-xs text-muted-foreground line-clamp-2">
                             {doc.content_preview.replace(/[*#_`]/g, '').substring(0, 150)}...
@@ -319,6 +319,7 @@ export function SearchCommand({ open, onOpenChange }: SearchCommandProps) {
                         stroke="currentColor"
                         strokeWidth="2"
                         viewBox="0 0 24 24"
+                        aria-hidden="true"
                       >
                         <polyline points="9 18 15 12 9 6" />
                       </svg>

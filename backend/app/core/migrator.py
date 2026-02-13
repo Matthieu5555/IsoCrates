@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import Engine, text, inspect
+from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +237,7 @@ def _apply_migration(engine: Engine, migration: Migration) -> None:
                 conn.execute(text(sql_content))
 
             conn.commit()
-        except Exception as e:
+        except SQLAlchemyError as e:
             raise MigrationError(f"Failed to apply {migration.version}_{migration.name}: {e}") from e
 
     # Record as applied

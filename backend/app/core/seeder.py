@@ -57,8 +57,8 @@ def seed_initial_documents(db: Session) -> int:
             doc_create = DocumentCreate(**doc_data)
             service.create_or_update_document(doc_create, commit=False)
             seeded += 1
-        except Exception as e:
-            logger.warning("Failed to seed '%s': %s", doc_data.get("title", "?"), e)
+        except (ValueError, KeyError, TypeError) as e:
+            logger.warning("Invalid seed data for '%s': %s", doc_data.get("title", "?"), e)
 
     if seeded:
         db.commit()

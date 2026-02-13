@@ -15,6 +15,9 @@ import { ApiError } from '@/lib/api/client';
 import { ConfirmDialog } from '../tree/dialogs/ConfirmDialog';
 import { buttonVariants } from '@/lib/styles/button-variants';
 import { toast } from '@/lib/notifications/toast';
+import { useAuthStore } from '@/lib/store/authStore';
+
+const IS_READ_ONLY_MODE = process.env.NEXT_PUBLIC_READ_ONLY === 'true';
 
 interface DocumentViewProps {
   document: Document;
@@ -22,6 +25,8 @@ interface DocumentViewProps {
 
 export function DocumentView({ document: initialDocument }: DocumentViewProps) {
   const router = useRouter();
+  const user = useAuthStore((s) => s.user);
+  const readOnly = IS_READ_ONLY_MODE && !user;
   const [isEditing, setIsEditing] = useState(false);
   const [content, setContent] = useState(initialDocument.content);
   const [isSaving, setIsSaving] = useState(false);
@@ -49,7 +54,6 @@ export function DocumentView({ document: initialDocument }: DocumentViewProps) {
   // Lock body scroll when in full-screen edit mode
   useEffect(() => {
     if (isEditing) {
-      document.title; // just a reference check — actual lock:
       const original = window.document.body.style.overflow;
       window.document.body.style.overflow = 'hidden';
       return () => { window.document.body.style.overflow = original; };
@@ -191,8 +195,8 @@ export function DocumentView({ document: initialDocument }: DocumentViewProps) {
     <div className="max-w-4xl mx-auto p-4 md:p-8">
       <MetadataDigest
         document={document}
-        onEdit={handleEdit}
-        onDelete={handleDelete}
+        onEdit={readOnly ? undefined : handleEdit}
+        onDelete={readOnly ? undefined : handleDelete}
         isEditing={isEditing}
         latestAuthor={latestAuthor}
         latestDate={latestDate}
@@ -206,7 +210,7 @@ export function DocumentView({ document: initialDocument }: DocumentViewProps) {
             </p>
           )}
           <MarkdownRenderer content={document.content} />
-          <MetadataDetails document={document} onDocumentUpdate={handleDocumentUpdate} />
+          <MetadataDetails document={document} onDocumentUpdate={handleDocumentUpdate} readOnly={readOnly} />
           <VersionHistory docId={document.id} />
         </>
       )}

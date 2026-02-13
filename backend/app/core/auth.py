@@ -74,6 +74,13 @@ _UNAUTHENTICATED = AuthContext(
     grants=[],
 )
 
+# Public-read mode: anonymous can read all documents but cannot edit.
+_PUBLIC_READER = AuthContext(
+    user_id="anonymous",
+    role="viewer",
+    grants=[_StubGrant(path_prefix="", role="viewer")],
+)
+
 
 def get_bearer_scheme() -> HTTPBearer:
     """Expose the security scheme so OpenAPI picks it up."""
@@ -111,19 +118,24 @@ def optional_auth(
     when auth is enabled but no valid token is provided — ensuring permission
     checks always run and deny by default.
 
+    When ``PUBLIC_READ=true``, unauthenticated requests receive a root viewer
+    grant so anonymous visitors can browse documents.
+
     Never raises (unlike require_auth).
     """
     if not settings.auth_enabled:
         return _ANONYMOUS
 
+    _fallback = _PUBLIC_READER if settings.public_read else _UNAUTHENTICATED
+
     if credentials is None:
-        return _UNAUTHENTICATED
+        return _fallback
 
     payload = decode_token(
         credentials.credentials, settings.jwt_secret_key, settings.jwt_algorithm
     )
     if payload is None:
-        return _UNAUTHENTICATED
+        return _fallback
 
     return _load_auth_context(payload, db)
 

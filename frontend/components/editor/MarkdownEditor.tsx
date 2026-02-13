@@ -93,7 +93,7 @@ export function MarkdownEditor({ content, onChange, placeholder, fullScreen }: M
       },
     },
     onUpdate: ({ editor: ed }) => {
-      const md = (ed.storage as any).markdown.getMarkdown();
+      const md = (ed.storage as unknown as Record<string, { getMarkdown: () => string }>).markdown.getMarkdown();
       onChange(md);
     },
   });
@@ -102,7 +102,7 @@ export function MarkdownEditor({ content, onChange, placeholder, fullScreen }: M
   const setEditorContent = useCallback(
     (md: string) => {
       if (!editor) return;
-      const currentMd = (editor.storage as any).markdown.getMarkdown();
+      const currentMd = (editor.storage as unknown as Record<string, { getMarkdown: () => string }>).markdown.getMarkdown();
       if (currentMd !== md) {
         editor.commands.setContent(md);
       }

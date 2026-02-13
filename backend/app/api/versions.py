@@ -6,21 +6,10 @@ from typing import List
 
 from ..core.auth import AuthContext, optional_auth
 from ..database import get_db
-from ..exceptions import DocumentNotFoundError
 from ..schemas.version import VersionResponse
 from ..services import DocumentService
-from ..services.permission_service import check_permission
 
 router = APIRouter(prefix="/api/docs/{doc_id}/versions", tags=["versions"])
-
-
-def _verify_doc_read(service: DocumentService, auth: AuthContext, doc_id: str):
-    """Verify the caller can read the parent document. Raises 404 if not."""
-    doc = service.get_document(doc_id)
-    if doc is None:
-        raise DocumentNotFoundError(doc_id)
-    if not check_permission(auth.grants, doc.path, "read"):
-        raise DocumentNotFoundError(doc_id)
 
 
 @router.get("", response_model=List[VersionResponse])
@@ -33,7 +22,7 @@ def list_versions(
 ):
     """List all versions for a document."""
     service = DocumentService(db)
-    _verify_doc_read(service, auth, doc_id)
+    service.get_document_authorized(doc_id, auth.grants, "read")
     return service.get_document_versions(doc_id, skip, limit)
 
 
@@ -45,7 +34,7 @@ def get_latest_version(
 ):
     """Get latest version for a document."""
     service = DocumentService(db)
-    _verify_doc_read(service, auth, doc_id)
+    service.get_document_authorized(doc_id, auth.grants, "read")
     version = service.get_latest_version(doc_id)
     if not version:
         raise HTTPException(status_code=404, detail="No versions found")
@@ -61,7 +50,7 @@ def get_version(
 ):
     """Get specific version."""
     service = DocumentService(db)
-    _verify_doc_read(service, auth, doc_id)
+    service.get_document_authorized(doc_id, auth.grants, "read")
     version = service.get_version(version_id)
     if not version:
         raise HTTPException(status_code=404, detail="Version not found")

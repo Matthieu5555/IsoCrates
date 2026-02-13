@@ -113,8 +113,8 @@ class ScoutRunner:
         area_tokens = sum(m.token_estimate for m in area_module_map.values())
         budget_ratio = area_tokens / self._context_window
 
-        print(f"\n[Area Scout] {area.name}: {len(area_module_map)} modules, "
-              f"~{area_tokens:,} tokens (budget_ratio={budget_ratio:.2f})")
+        logger.info("\n[Area Scout] %s: %s modules, ~%s tokens (budget_ratio=%.2f)",
+                    area.name, len(area_module_map), f"{area_tokens:,}", budget_ratio)
 
         if len(area_module_map) >= 2:
             reports = self._run_module_scouts(area_module_map, budget_ratio)
@@ -128,14 +128,14 @@ class ScoutRunner:
             reports = self._run_topic_scouts(area_metrics, budget_ratio)
 
         combined = "\n\n---\n\n".join(reports.values())
-        print(f"[Area Scout] {area.name}: {len(combined):,} chars total")
+        logger.info("[Area Scout] %s: %s chars total", area.name, f"{len(combined):,}")
 
         # Lighter compression — areas are sized to fit the planner's context
         compression_target = int(self._planner_context_window * 0.5 * 4)
         compression_target = max(compression_target, 15_000)
 
         if len(combined) > compression_target:
-            print(f"[Area Scout] Compressing ({len(combined):,} → ~{compression_target // 1000}K)...")
+            logger.info("[Area Scout] Compressing (%s → ~%sK)...", f"{len(combined):,}", compression_target // 1000)
             compressed_by_key = self._compress_reports(reports, target_chars=compression_target)
             compressed_text = "\n\n---\n\n".join(compressed_by_key.values())
         else:
@@ -162,32 +162,32 @@ class ScoutRunner:
         budget_ratio = metrics["token_estimate"] / self._context_window
 
         if module_map:
-            print(f"[Modules] {len(module_map)} modules detected:")
+            logger.info("[Modules] %s modules detected:", len(module_map))
             for mod_name, mod_info in sorted(
                 module_map.items(), key=lambda x: -x[1].total_bytes
             ):
                 imports = f" → imports: {', '.join(sorted(mod_info.imports_from))}" if mod_info.imports_from else ""
-                print(f"   {mod_name}: {len(mod_info.files)} files, "
-                      f"~{mod_info.token_estimate:,} tokens{imports}")
+                logger.info("   %s: %s files, ~%s tokens%s",
+                            mod_name, len(mod_info.files), f"{mod_info.token_estimate:,}", imports)
 
-        print(f"\n[Sizing] ~{metrics['token_estimate']:,} tokens, "
-              f"{metrics['file_count']} files, {metrics['total_bytes']:,} bytes "
-              f"→ {metrics['size_label']} (budget_ratio={budget_ratio:.2f})")
+        logger.info("\n[Sizing] ~%s tokens, %s files, %s bytes → %s (budget_ratio=%.2f)",
+                    f"{metrics['token_estimate']:,}", metrics['file_count'],
+                    f"{metrics['total_bytes']:,}", metrics['size_label'], budget_ratio)
         top3 = list(metrics["top_dirs"].items())[:3]
         if top3:
             top_str = ", ".join(f"{d} ({s // 1024}KB)" for d, s in top3)
-            print(f"[Sizing] Top dirs: {top_str}")
+            logger.info("[Sizing] Top dirs: %s", top_str)
 
         use_module_scouts = budget_ratio > 1.0 and len(module_map) >= 4
 
         if use_module_scouts:
-            print(f"[Scouts] Large repo with {len(module_map)} modules — using module-based scouting")
+            logger.info("[Scouts] Large repo with %s modules — using module-based scouting", len(module_map))
             reports = self._run_module_scouts(module_map, budget_ratio)
         else:
             reports = self._run_topic_scouts(metrics, budget_ratio)
 
         combined = "\n\n---\n\n".join(reports.values())
-        print(f"\n[Scouts] All reports collected: {len(combined)} chars total")
+        logger.info("\n[Scouts] All reports collected: %s chars total", len(combined))
 
         # Adaptive compression target: reserve ~50% of planner context for
         # the prompt template, convert remaining tokens to chars (× 4).
@@ -195,11 +195,11 @@ class ScoutRunner:
         compression_target = max(compression_target, 15_000)  # floor
 
         if len(combined) > compression_target:
-            print(f"[Scouts] Compressing reports for writers "
-                  f"({len(combined)} chars → ~{compression_target // 1000}K)...")
+            logger.info("[Scouts] Compressing reports for writers "
+                        "(%s chars → ~%sK)...", len(combined), compression_target // 1000)
             compressed_by_key = self._compress_reports(reports, target_chars=compression_target)
             compressed_text = "\n\n---\n\n".join(compressed_by_key.values())
-            print(f"[Scouts] Compressed: {len(compressed_text)} chars")
+            logger.info("[Scouts] Compressed: %s chars", len(compressed_text))
         else:
             compressed_by_key = reports
             compressed_text = combined
@@ -266,8 +266,8 @@ class ScoutRunner:
         else:
             scouts_to_run = list(SCOUT_DEFINITIONS.keys())
 
-        print(f"[Scouts] Running {len(scouts_to_run)} scouts: {', '.join(scouts_to_run)} "
-              f"(max {self._max_iters} iters each)")
+        logger.info("[Scouts] Running %s scouts: %s (max %s iters each)",
+                    len(scouts_to_run), ", ".join(scouts_to_run), self._max_iters)
 
         # Build prompts for all scouts up front
         scout_tasks: list[dict] = []
@@ -299,7 +299,7 @@ class ScoutRunner:
         # Sequential path: original behavior
         reports: dict[str, str] = {}
         for idx, task in enumerate(scout_tasks, 1):
-            print(f"\n[Scout {idx}/{len(scout_tasks)}] {task['name']}...")
+            logger.info("\n[Scout %s/%s] %s...", idx, len(scout_tasks), task['name'])
             _, report = self._run_single_topic_scout(task, self.scout_agent)
             reports[task["key"]] = report
 
@@ -343,10 +343,10 @@ class ScoutRunner:
                 if report_path.exists():
                     report_text = report_path.read_text()
                     lines = len(report_text.strip().split("\n"))
-                    print(f"   [Done] {scout_name}: {lines} lines")
+                    logger.info("   [Done] %s: %s lines", scout_name, lines)
                     return scout_key, report_text
                 else:
-                    print(f"   [Warning] Scout {scout_key} did not produce a report")
+                    logger.warning("   [Warning] Scout %s did not produce a report", scout_key)
                     return scout_key, (
                         f"## Scout Report: {scout_name}\n"
                         f"### Key Findings\nNo report produced.\n"
@@ -359,7 +359,7 @@ class ScoutRunner:
                     wait = 2 ** attempt
                     logger.warning("Scout %s attempt %d failed, retrying in %ds: %s",
                                    scout_key, attempt, wait, e)
-                    print(f"   [Retry] {scout_name} failed, retrying in {wait}s...")
+                    logger.info("   [Retry] %s failed, retrying in %ss...", scout_name, wait)
                     time.sleep(wait)
                 else:
                     logger.error("Scout %s failed after %d attempts: %s",
@@ -383,9 +383,9 @@ class ScoutRunner:
         budget_ratio: float,
     ) -> dict[str, str]:
         assignments = assign_module_scouts(module_map, budget_ratio=budget_ratio)
-        print(f"[Module Scouts] {len(assignments)} scouts for {len(module_map)} modules:")
+        logger.info("[Module Scouts] %s scouts for %s modules:", len(assignments), len(module_map))
         for a in assignments:
-            print(f"   {a['name']}: {a['focus_description']}")
+            logger.info("   %s: %s", a['name'], a['focus_description'])
 
         # Build tasks for parallel/sequential execution
         scout_tasks: list[dict] = []
@@ -409,7 +409,7 @@ class ScoutRunner:
         # Sequential path
         reports: dict[str, str] = {}
         for idx, task in enumerate(scout_tasks, 1):
-            print(f"\n[Scout {idx}/{len(scout_tasks)}] Module: {task['name']}...")
+            logger.info("\n[Scout %s/%s] Module: %s...", idx, len(scout_tasks), task['name'])
             _, report = self._run_single_module_scout(task, self.scout_agent)
             reports[task["key"]] = report
 
@@ -441,10 +441,10 @@ class ScoutRunner:
 
             if report_path.exists():
                 report_content = report_path.read_text()
-                print(f"   Report: {len(report_content)} chars")
+                logger.info("   Report: %s chars", len(report_content))
                 return scout_key, report_content
             else:
-                print(f"   [Warning] No report file found at {report_path}")
+                logger.warning("   [Warning] No report file found at %s", report_path)
                 return scout_key, (
                     f"## Module Scout Report: {modules_str}\n"
                     f"### Key Findings\nNo report produced.\n"
@@ -517,7 +517,7 @@ List any new files/features that may need documentation.
 
 Be thorough but concise. Focus on WHAT CHANGED, not on describing the whole codebase."""
 
-        print("\n[Scout] Running diff-focused change analysis...")
+        logger.info("\n[Scout] Running diff-focused change analysis...")
         try:
             conversation = self._Conversation(
                 agent=self.scout_agent,
@@ -530,10 +530,10 @@ Be thorough but concise. Focus on WHAT CHANGED, not on describing the whole code
             report_path = Path("/tmp/scout_report_diff.md")
             if report_path.exists():
                 report = report_path.read_text()
-                print(f"   [Done] Diff scout: {len(report.splitlines())} lines")
+                logger.info("   [Done] Diff scout: %s lines", len(report.splitlines()))
                 return report
             else:
-                print("   [Warning] Diff scout did not produce a report")
+                logger.warning("   [Warning] Diff scout did not produce a report")
                 return "## Scout Report: Change Analysis\n### Key Findings\nNo report produced.\n"
         except Exception as e:
             logger.error("Diff scout failed: %s", e)
@@ -570,8 +570,10 @@ Be thorough but concise. Focus on WHAT CHANGED, not on describing the whole code
         else:
             passes = 3  # 27× max (3^3)
 
-        print(f"   [Compression] {total_chars:,} chars → ~{target_chars:,} target "
-              f"({compression_ratio:.1f}× ratio, {passes} pass{'es' if passes > 1 else ''})")
+        logger.info("   [Compression] %s chars → ~%s target "
+                    "(%.1f× ratio, %s pass%s)",
+                    f"{total_chars:,}", f"{target_chars:,}",
+                    compression_ratio, passes, "es" if passes > 1 else "")
 
         current = dict(reports_by_key)
         for pass_num in range(1, passes + 1):
@@ -582,7 +584,8 @@ Be thorough but concise. Focus on WHAT CHANGED, not on describing the whole code
 
             if pass_num > 1:
                 current_total = sum(len(r) for r in current.values())
-                print(f"   [Pass {pass_num}/{passes}] {current_total:,} → ~{pass_target:,} chars")
+                logger.info("   [Pass %s/%s] %s → ~%s chars",
+                            pass_num, passes, f"{current_total:,}", f"{pass_target:,}")
 
             current = self._compress_single_pass(current, pass_target, pass_num, passes)
 
@@ -638,7 +641,7 @@ Be thorough but concise. Focus on WHAT CHANGED, not on describing the whole code
                         text += block.text
                 if text.strip():
                     compressed[key] = text.strip()
-                    print(f"   [{key}] {len(report)} → {len(compressed[key])} chars")
+                    logger.info("   [%s] %s → %s chars", key, len(report), len(compressed[key]))
                 else:
                     compressed[key] = report
             except Exception as e:

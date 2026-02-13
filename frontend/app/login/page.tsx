@@ -32,9 +32,9 @@ export default function LoginPage() {
         setAuth(res.user, res.token);
       }
       router.push('/docs');
-    } catch (err: any) {
-      const msg = err?.message;
-      if (msg?.includes('Invalid') || msg?.includes('password') || msg?.includes('credentials') || msg?.includes('not found')) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('Invalid') || msg.includes('password') || msg.includes('credentials') || msg.includes('not found')) {
         setError(msg);
       } else {
         setError('Authentication failed. Please try again.');

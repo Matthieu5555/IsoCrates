@@ -11,7 +11,7 @@
 services:
   # Caddy reverse proxy — automatic HTTPS via Let's Encrypt
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.9-alpine
     container_name: isocrates-caddy
     ports:
       - "80:80"
@@ -31,6 +31,7 @@ services:
     environment:
       ENVIRONMENT: production
       AUTH_ENABLED: "true"
+      PUBLIC_READ: "true"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       CORS_ALLOWED_ORIGINS: "https://${DOMAIN}"
       DATABASE_URL: postgresql://isocrates:${POSTGRES_PASSWORD}@postgres:5432/isocrates
@@ -48,6 +49,7 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: "https://${DOMAIN}"
       NEXT_PUBLIC_API_URL_INTERNAL: http://backend-api:8000
+      NEXT_PUBLIC_READ_ONLY: "true"
 
 volumes:
   caddy_data:

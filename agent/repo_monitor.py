@@ -5,9 +5,12 @@ Provides functions to detect and quantify repository changes
 for intelligent documentation regeneration.
 """
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("isocrates.agent")
 
 
 def get_commit_count_since(repo_path: Path, since_sha: str) -> Optional[int]:
@@ -46,7 +49,7 @@ def get_commit_count_since(repo_path: Path, since_sha: str) -> Optional[int]:
         return count
 
     except (subprocess.CalledProcessError, ValueError) as e:
-        print(f"[RepoMonitor] Failed to count commits: {e}")
+        logger.error("[RepoMonitor] Failed to count commits: %s", e)
         return None
 
 
@@ -70,14 +73,14 @@ def has_significant_changes(
 
     if commit_count is None:
         # Can't determine - assume significant to trigger regeneration
-        print(f"[RepoMonitor] Cannot compare to commit {since_sha[:8]}, assuming significant changes")
+        logger.info("[RepoMonitor] Cannot compare to commit %s, assuming significant changes", since_sha[:8])
         return True
 
     if commit_count >= threshold:
-        print(f"[RepoMonitor] Significant changes detected: {commit_count} commits since {since_sha[:8]}")
+        logger.info("[RepoMonitor] Significant changes detected: %s commits since %s", commit_count, since_sha[:8])
         return True
     else:
-        print(f"[RepoMonitor] Minor changes: {commit_count} commits since {since_sha[:8]} (threshold: {threshold})")
+        logger.info("[RepoMonitor] Minor changes: %s commits since %s (threshold: %s)", commit_count, since_sha[:8], threshold)
         return False
 
 
@@ -116,5 +119,5 @@ def get_repo_unchanged_status(repo_path: Path, last_sha: str) -> tuple[bool, str
         return False, f"Repository changed: {commit_count} new commits since {last_sha[:8]}"
 
     except subprocess.CalledProcessError as e:
-        print(f"[RepoMonitor] Error checking repo status: {e}")
+        logger.error("[RepoMonitor] Error checking repo status: %s", e)
         return False, "Repository status unknown"

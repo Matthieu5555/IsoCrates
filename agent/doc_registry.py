@@ -8,10 +8,13 @@ frontmatter, and we maintain a registry for fast lookups.
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional, Dict, List
 from datetime import datetime
 import re
+
+logger = logging.getLogger(__name__)
 
 
 REGISTRY_FILE = Path("/notes/.doc_registry.json")
@@ -111,7 +114,8 @@ def find_document_by_id(doc_id: str, notes_dir: Path = Path("/notes")) -> Option
                 metadata, _ = parse_frontmatter(content)
             if metadata and metadata.get('id') == doc_id:
                 return md_file
-        except Exception:
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            logger.debug("Skipping %s: %s", md_file, e)
             continue
 
     return None

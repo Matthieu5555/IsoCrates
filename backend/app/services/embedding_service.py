@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..core.config import settings
 from ..repositories.document_repository import DocumentRepository
+from ..schemas.document import SimilarDocumentResponse
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,8 @@ class EmbeddingService:
             response = litellm.embedding(**kwargs)
             return response.data[0]["embedding"]
 
-        except Exception:
+        except (litellm.exceptions.APIError, litellm.exceptions.APIConnectionError,
+                litellm.exceptions.AuthenticationError, ValueError, KeyError):
             logger.exception("Failed to generate embedding")
             return None
 
@@ -63,7 +65,7 @@ class EmbeddingService:
         if not self.is_configured():
             return False
 
-        doc = self.doc_repo.get_by_id(doc_id)
+        doc = self.doc_repo.get_by_id_optional(doc_id)
         if not doc or not doc.description:
             return False
 
@@ -81,7 +83,7 @@ class EmbeddingService:
         limit: int = 5,
         exclude_id: str | None = None,
         allowed_prefixes: list[str] | None = None,
-    ) -> list:
+    ) -> list[SimilarDocumentResponse]:
         """Find documents with descriptions similar to the given text."""
         if not self.is_configured():
             return []
@@ -102,7 +104,7 @@ class EmbeddingService:
         doc_id: str,
         limit: int = 5,
         allowed_prefixes: list[str] | None = None,
-    ) -> list:
+    ) -> list[SimilarDocumentResponse]:
         """Find documents similar to an existing document."""
         doc = self.doc_repo.get_by_id(doc_id)
         if not doc or not doc.description:

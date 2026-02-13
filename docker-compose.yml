@@ -13,7 +13,7 @@
 services:
   # PostgreSQL Database
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.6-alpine
     container_name: isocrates-postgres
     environment:
       POSTGRES_USER: isocrates
@@ -55,6 +55,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
 
   # Frontend (Next.js)
@@ -73,7 +79,8 @@ services:
       NEXT_PUBLIC_API_TOKEN: ${DOC_API_TOKEN:-}
       PORT: 3001
     depends_on:
-      - backend-api
+      backend-api:
+        condition: service_healthy
     restart: unless-stopped
 
   # Documentation Agent (analyzes repos with OpenHands + Claude)
@@ -106,14 +113,15 @@ services:
       - ./agent:/workspace:ro
       # SECURITY: Read-write repos with security options
       - ./repos:/repos:rw,nosuid,nodev
-    # SECURITY: Read-only root filesystem (agent shouldn't write to system)
-    read_only: false  # OpenHands needs write access to /tmp
+    # SECURITY: Read-only root filesystem (writable /tmp provided via tmpfs below)
+    read_only: true
     tmpfs:
       # SECURITY: Temp directory with no-exec, size limit
       - /tmp:rw,noexec,nosuid,size=1g
     working_dir: /workspace
     depends_on:
-      - backend-api
+      backend-api:
+        condition: service_healthy
     command: tail -f /dev/null
     restart: unless-stopped
 
@@ -136,8 +144,8 @@ services:
     memswap_limit: 4g
     pids_limit: 200
 
-    # SECURITY: Use non-root user (requires Dockerfile update)
-    # user: "1000:1000"
+    # SECURITY: Run as non-root user (matches 'agent' user in Dockerfile)
+    user: "1000:1000"
 
   # Worker: polls for queued generation jobs and runs the agent
   # Only starts with: docker compose --profile agent up
@@ -161,9 +169,12 @@ services:
     working_dir: /app
     command: python worker.py
     depends_on:
-      - backend-api
-      - doc-agent
-      - postgres
+      backend-api:
+        condition: service_healthy
+      doc-agent:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

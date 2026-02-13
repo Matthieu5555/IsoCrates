@@ -78,7 +78,7 @@ class DocumentLifecycle:
                 "count": len(all_docs),
                 "related_count": len(related_docs),
             }
-        except Exception as e:
+        except (OSError, ConnectionError, ValueError) as e:
             logger.warning("Could not discover existing documents: %s", e)
             return {
                 "all_docs": [],
@@ -129,7 +129,7 @@ class DocumentLifecycle:
         if not existing_list:
             return None
 
-        print(f"[Regen] Found {len(existing_list)} existing doc(s) for this repo")
+        logger.info("Found %d existing doc(s) for this repo", len(existing_list))
 
         existing_docs = []
         last_commit_sha = None
@@ -162,7 +162,7 @@ class DocumentLifecycle:
         git_diff = ""
         git_log = ""
         if last_commit_sha:
-            print(f"[Regen] Last documented commit: {last_commit_sha[:8]}")
+            logger.info("Last documented commit: %s", last_commit_sha[:8])
             try:
                 diff_result = subprocess.run(
                     ["git", "diff", "--stat", f"{last_commit_sha}..HEAD"],
@@ -192,14 +192,14 @@ class DocumentLifecycle:
                 )
                 if log_result.returncode == 0:
                     git_log = log_result.stdout
-            except (subprocess.CalledProcessError, OSError) as e:
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
                 logger.warning("Could not get git diff: %s", e)
         else:
-            print("[Regen] No commit SHA found in existing docs, will do full re-exploration")
+            logger.info("No commit SHA found in existing docs, will do full re-exploration")
             return None
 
         if not git_diff.strip() and not git_log.strip():
-            print("[Regen] No changes detected since last generation")
+            logger.info("No changes detected since last generation")
             return {
                 "last_commit_sha": last_commit_sha,
                 "existing_docs": existing_docs,
@@ -207,9 +207,8 @@ class DocumentLifecycle:
                 "git_log": "",
             }
 
-        print(f"[Regen] Changes detected:")
-        print(f"   Commits since last gen: {len(git_log.strip().splitlines())}")
-        print(f"   Diff size: {len(git_diff)} chars")
+        logger.info("Changes detected: %d commits, %d char diff",
+                    len(git_log.strip().splitlines()), len(git_diff))
 
         return {
             "last_commit_sha": last_commit_sha,
@@ -257,7 +256,7 @@ class DocumentLifecycle:
                                 if age.days < 7:
                                     human_edited.add(doc_id)
                                     break
-                except Exception:
+                except (OSError, ConnectionError, ValueError, KeyError):
                     logger.debug("Could not check versions for doc %s", doc_id)
 
             user_organized: set[str] = set()
@@ -270,8 +269,8 @@ class DocumentLifecycle:
                 if expected_id != doc_id:
                     user_organized.add(doc_id)
 
-            print(f"[Snapshot] {len(doc_ids)} existing doc(s) for this repo, "
-                  f"{len(human_edited)} human-edited (7d), {len(user_organized)} user-organized")
+            logger.info("Snapshot: %d existing doc(s), %d human-edited (7d), %d user-organized",
+                        len(doc_ids), len(human_edited), len(user_organized))
             return {
                 "doc_ids": doc_ids,
                 "by_id": by_id,
@@ -302,7 +301,7 @@ class DocumentLifecycle:
         result = {"deleted": 0, "preserved_human": 0, "preserved_user_organized": 0, "preserved_failed": 0, "errors": []}
 
         if not snapshot["doc_ids"]:
-            print("[Cleanup] No snapshot — skipping orphan cleanup")
+            logger.info("No snapshot — skipping orphan cleanup")
             return result
 
         # Circuit breaker: refuse to delete when the generation run
@@ -310,18 +309,18 @@ class DocumentLifecycle:
         # network blip must NEVER destroy existing documentation.
         total_attempted = len(generated_ids) + len(failed_ids)
         if total_attempted == 0:
-            print("[Cleanup] SAFETY: No documents were attempted — skipping orphan cleanup entirely")
+            logger.warning("SAFETY: No documents were attempted — skipping orphan cleanup entirely")
             return result
 
         success_rate = len(generated_ids) / total_attempted
         if success_rate < 0.5:
-            print(f"[Cleanup] SAFETY: Only {len(generated_ids)}/{total_attempted} documents succeeded "
-                  f"({success_rate:.0%}) — skipping orphan cleanup to protect existing docs")
+            logger.warning("SAFETY: Only %d/%d documents succeeded (%.0f%%) — skipping orphan cleanup to protect existing docs",
+                         len(generated_ids), total_attempted, success_rate * 100)
             return result
 
         orphans = snapshot["doc_ids"] - generated_ids - failed_ids
         if not orphans:
-            print("[Cleanup] No orphaned documents found")
+            logger.info("No orphaned documents found")
             return result
 
         human_edited = snapshot["human_edited"]
@@ -338,12 +337,12 @@ class DocumentLifecycle:
         if preserved_human:
             for doc_id in preserved_human:
                 title = snapshot["by_id"].get(doc_id, {}).get("title", doc_id)
-                print(f"[Cleanup] Preserving human-edited: {title} ({doc_id})")
+                logger.info("Preserving human-edited: %s (%s)", title, doc_id)
 
         if preserved_user_org:
             for doc_id in preserved_user_org:
                 title = snapshot["by_id"].get(doc_id, {}).get("title", doc_id)
-                print(f"[Cleanup] Preserving user-organized: {title} ({doc_id})")
+                logger.info("Preserving user-organized: %s (%s)", title, doc_id)
 
         if not to_delete:
             reasons = []
@@ -351,21 +350,21 @@ class DocumentLifecycle:
                 reasons.append(f"{len(preserved_human)} human-edited")
             if preserved_user_org:
                 reasons.append(f"{len(preserved_user_org)} user-organized")
-            print(f"[Cleanup] {len(orphans)} orphan(s) found, all preserved ({', '.join(reasons) or 'protected'})")
+            logger.info("%d orphan(s) found, all preserved (%s)", len(orphans), ', '.join(reasons) or 'protected')
             return result
 
-        print(f"[Cleanup] Deleting {len(to_delete)} orphaned doc(s)...")
+        logger.info("Deleting %d orphaned doc(s)...", len(to_delete))
         for doc_id in to_delete:
             title = snapshot["by_id"].get(doc_id, {}).get("title", doc_id)
-            print(f"   - {title} ({doc_id})")
+            logger.info("  - %s (%s)", title, doc_id)
 
         delete_result = self.api_client.batch_delete(list(to_delete))
         result["deleted"] = delete_result.get("succeeded", 0)
         result["errors"] = delete_result.get("errors", [])
 
         if result["errors"]:
-            print(f"[Cleanup] Batch delete had errors: {result['errors']}")
+            logger.warning("Batch delete had errors: %s", result["errors"])
 
-        print(f"[Cleanup] Done: {result['deleted']} deleted, {result['preserved_human']} preserved (human), "
-              f"{result['preserved_user_organized']} preserved (user-organized), {result['preserved_failed']} preserved (failed)")
+        logger.info("Cleanup done: %d deleted, %d preserved (human), %d preserved (user-organized), %d preserved (failed)",
+                    result["deleted"], result["preserved_human"], result["preserved_user_organized"], result["preserved_failed"])
         return result

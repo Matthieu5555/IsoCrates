@@ -78,7 +78,7 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
                 <a href={href} target="_blank" rel="noopener noreferrer"
                    className="inline-flex items-center gap-0.5" {...props}>
                   {children}
-                  <ExternalLink className="inline h-3 w-3 opacity-50 shrink-0" />
+                  <ExternalLink className="inline h-3 w-3 opacity-50 shrink-0" aria-hidden="true" />
                 </a>
               );
             }

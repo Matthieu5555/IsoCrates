@@ -145,20 +145,20 @@ def _walk_files(
             for fname in files:
                 if fname in SKIP_NAMES:
                     continue
-                ext = os.path.splitext(fname)[1].lower()
+                fpath = Path(root) / fname
+                ext = fpath.suffix.lower()
                 if ext not in SOURCE_EXTS:
                     continue
-                fpath = os.path.join(root, fname)
                 try:
-                    size = os.path.getsize(fpath)
+                    size = fpath.stat().st_size
                 except OSError:
                     continue
                 if size > 512_000:  # skip >500KB (generated/minified)
                     continue
-                rel = os.path.relpath(fpath, repo_str)
+                rel = fpath.relative_to(repo_path).as_posix()
                 file_manifest.append((rel, size))
                 total_bytes += size
-                top_dir = rel.split(os.sep)[0] if os.sep in rel else "."
+                top_dir = Path(rel).parts[0] if Path(rel).parts[0] != rel else "."
                 top_dirs[top_dir] = top_dirs.get(top_dir, 0) + size
     except OSError as e:
         logger.warning("Filesystem walk failed, using fallback estimates: %s", e)
@@ -364,7 +364,7 @@ def detect_crates(repo_path: Path) -> list[dict]:
     try:
         for root, dirs, files in os.walk(repo_path):
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-            rel_root = os.path.relpath(root, str(repo_path))
+            rel_root = Path(root).relative_to(repo_path).as_posix()
             if rel_root == ".":
                 continue  # skip root — it's the repo itself, not a crate
 
@@ -382,10 +382,10 @@ def detect_crates(repo_path: Path) -> list[dict]:
 
     # Dedup: remove crates whose ancestor is also a crate.
     # Sort by depth (shallowest first) so ancestors are processed first.
-    sorted_paths = sorted(crate_paths, key=lambda p: p.count(os.sep))
+    sorted_paths = sorted(crate_paths, key=lambda p: p.count("/"))
     kept: list[str] = []
     for cp in sorted_paths:
-        if any(cp.startswith(ancestor + os.sep) for ancestor in kept):
+        if any(cp.startswith(ancestor + "/") for ancestor in kept):
             continue  # deeper path is a sub-module of an already-kept crate
         kept.append(cp)
 

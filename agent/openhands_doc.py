@@ -25,11 +25,12 @@ import json
 import logging
 import os
 import re
-import signal
 import shutil
+import signal
 import sys
 import argparse
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 from datetime import datetime
@@ -44,7 +45,6 @@ from openhands.sdk import LLM, Agent, Conversation, Tool
 from openhands.sdk.llm import Message, TextContent
 from openhands.sdk.context.condenser import LLMSummarizingCondenser
 from openhands.tools.file_editor import FileEditorTool
-from openhands.tools.task_tracker import TaskTrackerTool
 from openhands.tools.terminal import TerminalTool
 
 # Static repo analysis
@@ -118,23 +118,20 @@ os.environ.setdefault("PAGER", "cat")
 # Graceful shutdown — checked between pipeline phases
 # ---------------------------------------------------------------------------
 
-_shutdown_requested = False
+_shutdown_event = threading.Event()
 
 
 def _handle_shutdown_signal(signum: int, frame: Any) -> None:
     """Signal handler for graceful shutdown (SIGTERM / SIGINT)."""
-    global _shutdown_requested
     sig_name = signal.Signals(signum).name
     logger.warning("Received %s — requesting graceful shutdown", sig_name)
-    print(f"\n[Shutdown] Received {sig_name} — stopping after current phase completes...")
-    _shutdown_requested = True
+    _shutdown_event.set()
 
 
 def _check_shutdown(phase: str) -> bool:
     """Return True and log if shutdown was requested before *phase*."""
-    if _shutdown_requested:
+    if _shutdown_event.is_set():
         logger.warning("Shutdown requested before %s phase — exiting gracefully", phase)
-        print(f"[Shutdown] Stopping before {phase} phase — partial results may be available")
         return True
     return False
 
@@ -151,13 +148,15 @@ SCOUT_MODEL = os.getenv("SCOUT_MODEL", "")
 PLANNER_MODEL = os.getenv("PLANNER_MODEL", "")
 WRITER_MODEL = os.getenv("WRITER_MODEL", "")
 
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "900"))
+
 
 def _resolve_api_key(tier: str) -> str | None:
     """Resolve API key: tier-specific → global → Docker secrets."""
     key = os.getenv(f"{tier}_API_KEY") or LLM_API_KEY
     if not key:
         key_file = os.getenv("OPENROUTER_API_KEY_FILE")
-        if key_file and os.path.exists(key_file):
+        if key_file and Path(key_file).exists():
             with open(key_file) as f:
                 key = f.read().strip()
     return key
@@ -185,7 +184,7 @@ def clone_repo(repo_url: str, destination: Path) -> Path:
     repo_path = destination / repo_name
 
     if repo_path.exists():
-        print(f"[Update] Updating: {repo_name}")
+        logger.info("[Update] Updating: %s", repo_name)
         try:
             subprocess.run(
                 ["git", "pull"],
@@ -194,9 +193,9 @@ def clone_repo(repo_url: str, destination: Path) -> Path:
                 capture_output=True,
             )
         except subprocess.CalledProcessError:
-            print("[Warning] Pull failed, using existing version")
+            logger.warning("[Warning] Pull failed, using existing version")
     else:
-        print(f"[Cloning] Cloning: {repo_url}")
+        logger.info("[Cloning] Cloning: %s", repo_url)
         subprocess.run(
             ["git", "clone", repo_url, str(repo_path)],
             check=True,
@@ -267,7 +266,7 @@ class OpenHandsDocGenerator:
             self._planner_config = resolve_model_config(PLANNER_MODEL)
             self._writer_config = resolve_model_config(WRITER_MODEL)
         except ModelConfigError as e:
-            print(f"[Error] Model configuration failed: {e}")
+            logger.error("[Error] Model configuration failed: %s", e)
             raise
 
         # ---- Tier 0: Scout Agent -------------------------------------------
@@ -275,7 +274,7 @@ class OpenHandsDocGenerator:
         self.scout_llm = LLM(
             model=SCOUT_MODEL,
             native_tool_calling=LLM_NATIVE_TOOL_CALLING,
-            timeout=900,
+            timeout=LLM_TIMEOUT,
             max_output_tokens=self._scout_config.max_output_tokens,
             litellm_extra_body=self._scout_config.extra_body or {},
             **self._scout_config.extra_llm_kwargs,
@@ -303,7 +302,7 @@ class OpenHandsDocGenerator:
         planner_output = min(self._planner_config.max_output_tokens, PLANNER_OUTPUT_CAP)
         self.planner_llm = LLM(
             model=PLANNER_MODEL,
-            timeout=900,
+            timeout=LLM_TIMEOUT,
             max_output_tokens=planner_output,
             litellm_extra_body=self._planner_config.extra_body or {},
             **self._planner_config.extra_llm_kwargs,
@@ -315,7 +314,7 @@ class OpenHandsDocGenerator:
         self.writer_llm = LLM(
             model=WRITER_MODEL,
             native_tool_calling=LLM_NATIVE_TOOL_CALLING,
-            timeout=900,
+            timeout=LLM_TIMEOUT,
             max_output_tokens=self._writer_config.max_output_tokens,
             litellm_extra_body=self._writer_config.extra_body or {},
             **self._writer_config.extra_llm_kwargs,
@@ -380,14 +379,14 @@ class OpenHandsDocGenerator:
             context_budget=self._planner_config.context_window,
         )
 
-        print("[Agent] Three-Tier Documentation Generator Configured:")
-        print(f"   Scout:   {SCOUT_MODEL} ({self._scout_config})")
-        print(f"   Planner: {PLANNER_MODEL} ({self._planner_config})")
-        print(f"   Writer:  {WRITER_MODEL} ({self._writer_config})")
-        print(f"   Condenser: scout={scout_condenser_size}, writer={writer_condenser_size}")
-        print(f"   Native tool calling: {LLM_NATIVE_TOOL_CALLING}")
-        print(f"   Workspace: {self.repo_path}")
-        print(f"   Output:    {self.notes_dir}")
+        logger.info("[Agent] Three-Tier Documentation Generator Configured:")
+        logger.info("   Scout:   %s (%s)", SCOUT_MODEL, self._scout_config)
+        logger.info("   Planner: %s (%s)", PLANNER_MODEL, self._planner_config)
+        logger.info("   Writer:  %s (%s)", WRITER_MODEL, self._writer_config)
+        logger.info("   Condenser: scout=%s, writer=%s", scout_condenser_size, writer_condenser_size)
+        logger.info("   Native tool calling: %s", LLM_NATIVE_TOOL_CALLING)
+        logger.info("   Workspace: %s", self.repo_path)
+        logger.info("   Output:    %s", self.notes_dir)
 
     # ------------------------------------------------------------------
     # Discovery
@@ -721,10 +720,10 @@ OUTPUT:
 
         commit_sha = self._get_current_commit_sha()
 
-        print(f"\n{'='*70}")
-        print(f"[Writer] GENERATING: {doc_spec['title']} ({doc_type})")
-        print(f"{'='*70}")
-        print(f"   Doc ID: {doc_id} ({resolved_from})")
+        logger.info("\n%s", "=" * 70)
+        logger.info("[Writer] GENERATING: %s (%s)", doc_spec['title'], doc_type)
+        logger.info("%s", "=" * 70)
+        logger.info("   Doc ID: %s (%s)", doc_id, resolved_from)
 
         # Check version priority
         priority_engine = VersionPriorityEngine(
@@ -739,7 +738,7 @@ OUTPUT:
                     doc_id, current_hashes
                 )
                 if not should_gen:
-                    print(f"   [Skip] {src_reason} (source-level)")
+                    logger.info("   [Skip] %s (source-level)", src_reason)
                     return {"status": "skipped", "reason": src_reason, "doc_id": doc_id, "resolved_from": resolved_from}
 
         # Full version priority check (commit-level)
@@ -747,10 +746,10 @@ OUTPUT:
             doc_id=doc_id, current_commit_sha=commit_sha
         )
         if not should_generate:
-            print(f"   [Skip] {reason}")
+            logger.info("   [Skip] %s", reason)
             return {"status": "skipped", "reason": reason, "doc_id": doc_id, "resolved_from": resolved_from}
 
-        print(f"   [Generate] {reason}")
+        logger.info("   [Generate] %s", reason)
 
         # Compute output path matching what the writer brief specifies
         doc_path = doc_spec.get("path", f"{self.crate}{self.repo_name}".rstrip("/"))
@@ -802,7 +801,7 @@ OUTPUT:
                 # Move from temp dir to final location
                 output_file.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(isolated_output), str(output_file))
-                print(f"   [Output] Moved from isolated dir to {output_file}")
+                logger.info("   [Output] Moved from isolated dir to %s", output_file)
             else:
                 # Writer may have ignored the temp path — search for the file
                 candidates = list(writer_tmp_base.rglob(output_filename))
@@ -822,7 +821,7 @@ OUTPUT:
                 shutil.rmtree(writer_tmp_base, ignore_errors=True)
 
             if not output_file.exists():
-                print(f"   [Warning] Output file not found")
+                logger.warning("   [Warning] Output file not found")
                 return {
                     "status": "warning",
                     "message": f"Output file not found for {title}",
@@ -838,7 +837,7 @@ OUTPUT:
 
             writer_description = (metadata or {}).get("description", "")
             if not writer_description:
-                print(f"   [Warning] Writer did not include description in bottomatter")
+                logger.warning("   [Warning] Writer did not include description in bottomatter")
 
             body = re.sub(r"^\*Documentation Written by.*?\*\n+", "", body)
             clean_content = re.sub(
@@ -851,9 +850,9 @@ OUTPUT:
             mermaid_errors = validate_mermaid_blocks(clean_content)
             if mermaid_errors:
                 error_details = format_errors_for_prompt(mermaid_errors)
-                print(f"   [Mermaid] {len(mermaid_errors)} diagram(s) have syntax errors, sending fix prompt...")
+                logger.info("   [Mermaid] %s diagram(s) have syntax errors, sending fix prompt...", len(mermaid_errors))
                 for err in mermaid_errors:
-                    print(f"      Block {err.block_index + 1} (line {err.line_number}): {err.error[:120]}")
+                    logger.info("      Block %s (line %s): %s", err.block_index + 1, err.line_number, err.error[:120])
 
                 # Save pre-fix content in case the fix times out and leaves
                 # a partial/corrupt file on disk.
@@ -897,9 +896,9 @@ OUTPUT:
                     # Check if retry fixed the errors
                     remaining = validate_mermaid_blocks(clean_content)
                     if remaining:
-                        print(f"   [Mermaid] {len(remaining)} diagram(s) still broken after retry — continuing anyway")
+                        logger.info("   [Mermaid] %s diagram(s) still broken after retry — continuing anyway", len(remaining))
                     else:
-                        print(f"   [Mermaid] All diagrams fixed after retry")
+                        logger.info("   [Mermaid] All diagrams fixed after retry")
 
             # Sanitize wikilinks: keep valid, convert files to GitHub, strip rest.
             # NOTE: This first pass uses planned titles so writers referencing
@@ -912,7 +911,7 @@ OUTPUT:
 
             # Check for empty content (writer failed to write file properly)
             if not clean_content.strip():
-                print(f"   [Error] Writer produced empty file — agent likely used touch instead of file_editor")
+                logger.error("   [Error] Writer produced empty file — agent likely used touch instead of file_editor")
                 return {
                     "status": "error",
                     "doc_id": doc_id,
@@ -926,9 +925,10 @@ OUTPUT:
             has_mermaid = "```mermaid" in clean_content
             wikilink_count = len(re.findall(r"\[\[.+?\]\]", clean_content))
 
-            print(f"   [Content] Tables: {'yes' if has_table else 'no'} | Diagrams: {'yes' if has_mermaid else 'no'} | Wikilinks: {wikilink_count}")
+            logger.info("   [Content] Tables: %s | Diagrams: %s | Wikilinks: %s",
+                        "yes" if has_table else "no", "yes" if has_mermaid else "no", wikilink_count)
             if wikilink_count < 5:
-                print(f"   [Content] Warning: low wikilink count ({wikilink_count}) — pages should have 10-20+")
+                logger.info("   [Content] Warning: low wikilink count (%s) — pages should have 10-20+", wikilink_count)
 
             keywords = DOCUMENT_TYPES.get(doc_type, {}).get("keywords", [])
 
@@ -967,12 +967,12 @@ OUTPUT:
                 content_size = len(clean_content.encode("utf-8"))
 
                 if api_result.get("method") == "filesystem":
-                    print(f"   [Fallback] Saved to file (API unavailable)")
+                    logger.info("   [Fallback] Saved to file (API unavailable)")
                 else:
-                    print(f"   [Success] Posted to API")
-                    print(f"   ID: {api_result.get('id', doc_id)}")
+                    logger.info("   [Success] Posted to API")
+                    logger.info("   ID: %s", api_result.get('id', doc_id))
 
-                print(f"   Size: {content_size:,} bytes")
+                logger.info("   Size: %s bytes", f"{content_size:,}")
 
                 return {
                     "status": "success",
@@ -1087,10 +1087,10 @@ OUTPUT:
                 logger.warning("Failed to fetch doc %s for cleanup: %s", doc_id, e)
 
         if dangling_titles:
-            print(f"\n[Wikilink Cleanup] {len(dangling_titles)} planned page(s) were never generated:")
+            logger.info("\n[Wikilink Cleanup] %s planned page(s) were never generated:", len(dangling_titles))
             for dt in sorted(dangling_titles):
-                print(f"   - {dt}")
-            print(f"   Re-sanitizing {len(results)} documents to strip broken wikilinks...")
+                logger.info("   - %s", dt)
+            logger.info("   Re-sanitizing %s documents to strip broken wikilinks...", len(results))
 
             resanitized_count = 0
             for title, result in results.items():
@@ -1118,7 +1118,7 @@ OUTPUT:
                         logger.warning("Failed to re-sanitize doc %s: %s", doc_id, e)
 
             if resanitized_count:
-                print(f"   Re-sanitized {resanitized_count} document(s)")
+                logger.info("   Re-sanitized %s document(s)", resanitized_count)
 
         # Broken wikilink validation report
         wikilink_pattern = re.compile(r'\[\[(.+?)\]\]')
@@ -1137,16 +1137,16 @@ OUTPUT:
                     dangling_report.setdefault(title, []).append(target)
 
         if dangling_report:
-            print(f"\n[Wikilink Report] Dangling wikilinks found in {len(dangling_report)} document(s):")
+            logger.info("\n[Wikilink Report] Dangling wikilinks found in %s document(s):", len(dangling_report))
             for doc_title, targets in sorted(dangling_report.items()):
                 unique_targets = sorted(set(targets))
-                print(f"   {doc_title}: {', '.join(unique_targets)}")
+                logger.info("   %s: %s", doc_title, ", ".join(unique_targets))
 
         # Summary
         total = len(results)
-        print("\n" + "=" * 70)
-        print("[Summary] GENERATION COMPLETE")
-        print("=" * 70)
+        logger.info("\n%s", "=" * 70)
+        logger.info("[Summary] GENERATION COMPLETE")
+        logger.info("%s", "=" * 70)
 
         successes = sum(1 for r in results.values() if r.get("status") == "success")
         skipped = sum(1 for r in results.values() if r.get("status") == "skipped")
@@ -1155,25 +1155,29 @@ OUTPUT:
             if r.get("status") in ("error", "error_fallback", "warning")
         )
 
-        print(f"   Pages: {total}  Success: {successes}  Skipped: {skipped}  Errors: {errors}")
+        logger.info("   Pages: %s  Success: %s  Skipped: %s  Errors: %s", total, successes, skipped, errors)
         if any(v > 0 for v in id_stats.values()):
-            print(f"   ID Resolution: {id_stats['reused']} reused, {id_stats['new']} new, {id_stats['renamed']} renamed")
+            logger.info("   ID Resolution: %s reused, %s new, %s renamed",
+                        id_stats['reused'], id_stats['new'], id_stats['renamed'])
 
         for title, result in results.items():
             status = result.get("status", "unknown")
             doc_id = result.get("doc_id", "")
             resolved = result.get("resolved_from", "")
             id_info = f" [{resolved}]" if resolved else ""
-            print(f"   {title}: {status} ({doc_id}){id_info}")
+            logger.info("   %s: %s (%s)%s", title, status, doc_id, id_info)
 
         # Orphan cleanup
         if snapshot["count"] > 0:
-            print("\n[Phase 4] CLEANUP — Removing orphaned documents...")
+            logger.info("\n[Phase 4] CLEANUP — Removing orphaned documents...")
             cleanup = self._cleanup_orphaned_docs(snapshot, generated_doc_ids, failed_doc_ids)
             if cleanup["deleted"] or cleanup["preserved_human"] or cleanup.get("preserved_user_organized", 0):
-                print(f"   Deleted: {cleanup['deleted']}  Preserved (human): {cleanup['preserved_human']}  "
-                      f"Preserved (user-organized): {cleanup.get('preserved_user_organized', 0)}  "
-                      f"Preserved (failed): {cleanup['preserved_failed']}")
+                logger.info("   Deleted: %s  Preserved (human): %s  "
+                            "Preserved (user-organized): %s  "
+                            "Preserved (failed): %s",
+                            cleanup['deleted'], cleanup['preserved_human'],
+                            cleanup.get('preserved_user_organized', 0),
+                            cleanup['preserved_failed'])
 
     # ------------------------------------------------------------------
     # Writer dispatch (shared helper for running writers + collecting stats)
@@ -1194,8 +1198,8 @@ OUTPUT:
         """
         max_workers = int(os.getenv("WRITER_PARALLEL", "3"))
         total = len(documents)
-        print(f"\n[Writers] Generating {total} documents "
-              f"(max {max_workers} parallel, detail first, hub last)...")
+        logger.info("\n[Writers] Generating %s documents "
+                    "(max %s parallel, detail first, hub last)...", total, max_workers)
 
         if max_workers > 1:
             return self._run_writers_parallel(
@@ -1220,7 +1224,7 @@ OUTPUT:
         ordered = detail_docs + hub_docs
 
         for idx, doc_spec in enumerate(ordered, 1):
-            print(f"\n[{idx}/{total}] Dispatching writer for: {doc_spec['title']}")
+            logger.info("\n[%s/%s] Dispatching writer for: %s", idx, total, doc_spec['title'])
             result = self.generate_document(
                 doc_spec, blueprint, discovery, scout_reports,
                 title_to_doc_id=title_to_doc_id,
@@ -1247,8 +1251,54 @@ OUTPUT:
         return results, generated_ids, failed_ids, id_stats
 
     # ------------------------------------------------------------------
-    # generate_all: dispatcher
+    # Public entry points
     # ------------------------------------------------------------------
+
+    def generate_single(self, doc_type: str, force: bool = False) -> dict:
+        """Generate a single document type (e.g. 'quickstart', 'api-reference').
+
+        Runs the full scout → planner → writer pipeline but produces only the
+        requested document.  If the planner's blueprint doesn't include the
+        requested type, a minimal spec is built from DOCUMENT_TYPES defaults.
+
+        Returns:
+            dict mapping document title to its generation result.
+        """
+        scout_reports = self._run_scouts()
+        blueprint = self._planner_think(scout_reports)
+
+        crate_path = f"{self.crate}{self.repo_name}".strip("/")
+        doc_spec = None
+        for doc in blueprint.get("documents", []):
+            if doc["doc_type"] == doc_type:
+                doc_spec = doc
+                break
+
+        if not doc_spec:
+            title = DOCUMENT_TYPES.get(doc_type, {}).get(
+                "title", doc_type.replace("-", " ").title()
+            )
+            doc_spec = {
+                "doc_type": doc_type,
+                "title": title,
+                "path": f"{crate_path}/{doc_type}",
+                "sections": [
+                    {"heading": "Overview", "rich_content": []},
+                ],
+                "key_files_to_read": ["README.md"],
+                "wikilinks_out": [],
+            }
+            blueprint = {
+                "repo_summary": blueprint.get("repo_summary", f"Repository {self.repo_name}"),
+                "complexity": blueprint.get("complexity", "medium"),
+                "documents": [doc_spec],
+            }
+
+        discovery = self._discover_existing_documents()
+        result = self.generate_document(
+            doc_spec, blueprint, discovery, scout_reports
+        )
+        return {doc_spec["title"]: result}
 
     def generate_all(self, force: bool = False) -> dict:
         """Full pipeline: Scouts explore → Planner thinks → Writers execute.
@@ -1258,9 +1308,9 @@ OUTPUT:
         module structure to split meaningfully.  Small repos go through the
         original single-area pipeline unchanged.
         """
-        print("\n" + "=" * 70)
-        print("[Pipeline] THREE-TIER DOCUMENTATION GENERATION")
-        print("=" * 70)
+        logger.info("\n%s", "=" * 70)
+        logger.info("[Pipeline] THREE-TIER DOCUMENTATION GENERATION")
+        logger.info("%s", "=" * 70)
 
         snapshot = self._snapshot_existing_docs()
         regen_ctx = self._get_regeneration_context()
@@ -1282,12 +1332,12 @@ OUTPUT:
                 force=force, regen_ctx=None, snapshot=snapshot,
             )
 
-        print(f"\n[Partitioner] Repository split into {len(areas)} documentation areas:")
+        logger.info("\n[Partitioner] Repository split into %s documentation areas:", len(areas))
         for area in areas:
             mods = ", ".join(area.module_names[:5])
             suffix = f"... +{len(area.module_names) - 5}" if len(area.module_names) > 5 else ""
-            print(f"   {area.name}: {len(area.module_names)} modules, "
-                  f"~{area.token_estimate:,} tokens ({mods}{suffix})")
+            logger.info("   %s: %s modules, ~%s tokens (%s%s)",
+                        area.name, len(area.module_names), f"{area.token_estimate:,}", mods, suffix)
 
         return self._generate_partitioned(
             areas=areas, snapshot=snapshot, force=force,
@@ -1316,10 +1366,10 @@ OUTPUT:
             if not regen_ctx["git_diff"].strip() and not regen_ctx["git_log"].strip():
                 current_sha = self._get_current_commit_sha()
                 if regen_ctx["last_commit_sha"] == current_sha and not force:
-                    print("\n[Pipeline] Repository unchanged since last generation — nothing to do.")
+                    logger.info("\n[Pipeline] Repository unchanged since last generation — nothing to do.")
                     return results
 
-            print("\n[Phase 1] DIFF SCOUT — Analyzing changes since last generation...")
+            logger.info("\n[Phase 1] DIFF SCOUT — Analyzing changes since last generation...")
             scout_reports = self._run_diff_scout(regen_ctx)
 
             existing_summary = "\n\n---\n\n## Existing Documentation Content\n"
@@ -1331,13 +1381,13 @@ OUTPUT:
                 existing_summary += "\n"
             scout_reports += existing_summary
         else:
-            print("\n[Phase 1] SCOUTS — Exploring repository...")
+            logger.info("\n[Phase 1] SCOUTS — Exploring repository...")
             scout_reports = self._run_scouts()
 
         if _check_shutdown("planner"):
             return results
 
-        print("\n[Phase 2] PLANNER — Designing documentation architecture...")
+        logger.info("\n[Phase 2] PLANNER — Designing documentation architecture...")
         planner_existing = regen_ctx["existing_docs"] if regen_ctx else None
         blueprint = self._planner_think(scout_reports, existing_docs=planner_existing)
 
@@ -1350,21 +1400,21 @@ OUTPUT:
                 doc_title = doc_info.get("title", "")
                 if doc_title:
                     if doc_title in title_to_doc_id:
-                        print(f"[Warning] Title collision: \"{doc_title}\" — keeping first match")
+                        logger.warning("[Warning] Title collision: \"%s\" — keeping first match", doc_title)
                     else:
                         title_to_doc_id[doc_title] = doc_id
             if title_to_doc_id:
-                print(f"[ID Resolution] Built title→ID map with {len(title_to_doc_id)} entries")
+                logger.info("[ID Resolution] Built title→ID map with %s entries", len(title_to_doc_id))
 
         discovery = self._discover_existing_documents()
-        print(f"   Existing documents in system: {discovery['count']}")
+        logger.info("   Existing documents in system: %s", discovery['count'])
 
         if _check_shutdown("writers"):
             return results
 
         writer_scout_reports = getattr(self, '_compressed_scout_reports', scout_reports)
 
-        print(f"\n[Phase 3] WRITERS — Generating {len(documents)} documents...")
+        logger.info("\n[Phase 3] WRITERS — Generating %s documents...", len(documents))
         results, generated_doc_ids, failed_doc_ids, id_stats = self._run_writers(
             documents=documents,
             blueprint=blueprint,
@@ -1414,22 +1464,22 @@ OUTPUT:
                     title_to_doc_id[doc_title] = doc_id
 
         discovery = self._discover_existing_documents()
-        print(f"   Existing documents in system: {discovery['count']}")
+        logger.info("   Existing documents in system: %s", discovery['count'])
 
         # === Process each content area ===
         for area_idx, area in enumerate(areas, 1):
-            print(f"\n{'='*70}")
-            print(f"[Area {area_idx}/{len(areas)}] {area.name}")
-            print(f"{'='*70}")
+            logger.info("\n%s", "=" * 70)
+            logger.info("[Area %s/%s] %s", area_idx, len(areas), area.name)
+            logger.info("%s", "=" * 70)
 
             # Phase 1: Area-scoped scouts
-            print(f"\n[Phase 1] Scouting area: {area.name}...")
+            logger.info("\n[Phase 1] Scouting area: %s...", area.name)
             scout_result = self.scout_runner.run_area(area)
             self._apply_scout_result(scout_result)
 
             # Phase 2: Area-scoped planner (uncompressed reports — the key
             # quality improvement over the single-area path for large repos)
-            print(f"\n[Phase 2] Planning area: {area.name}...")
+            logger.info("\n[Phase 2] Planning area: %s...", area.name)
             area_reports = scout_result.combined_text
             blueprint = self.planner.plan(area_reports)
 
@@ -1446,7 +1496,7 @@ OUTPUT:
 
             # Phase 3: Writers for this area
             writer_reports = scout_result.compressed_text
-            print(f"\n[Phase 3] Writing {len(documents)} documents for {area.name}...")
+            logger.info("\n[Phase 3] Writing %s documents for %s...", len(documents), area.name)
 
             area_results, gen_ids, fail_ids, stats = self._run_writers(
                 documents=documents,
@@ -1464,9 +1514,9 @@ OUTPUT:
                 all_id_stats[k] += stats.get(k, 0)
 
         # === Integration pass: cross-cutting hub pages ===
-        print(f"\n{'='*70}")
-        print("[Integration] Cross-cutting documentation")
-        print(f"{'='*70}")
+        logger.info("\n%s", "=" * 70)
+        logger.info("[Integration] Cross-cutting documentation")
+        logger.info("%s", "=" * 70)
 
         # Collect all titles generated so far (for the integration planner
         # to reference in wikilinks)
@@ -1490,7 +1540,7 @@ OUTPUT:
             integration_scout_text += f"### {area_sum['name']}\n{area_sum['summary']}\n\n"
             integration_scout_text += f"Pages: {', '.join(area_sum['doc_titles'])}\n\n"
 
-        print(f"\n[Phase 3] Writing {len(integration_docs)} integration documents...")
+        logger.info("\n[Phase 3] Writing %s integration documents...", len(integration_docs))
         int_results, int_gen, int_fail, int_stats = self._run_writers(
             documents=integration_docs,
             blueprint=integration_blueprint,
@@ -1605,7 +1655,7 @@ Examples:
     validator = RepositoryValidator()
     is_valid, error, sanitized_url = validator.validate_repo_url(args.repo)
     if not is_valid:
-        print(f"[Security] Repository URL validation failed: {error}")
+        logger.error("[Security] Repository URL validation failed: %s", error)
         sys.exit(1)
 
     # SECURITY: Validate crate path
@@ -1614,16 +1664,16 @@ Examples:
         args.crate
     )
     if not is_valid:
-        print(f"[Security] Crate validation failed: {error}")
+        logger.error("[Security] Crate validation failed: %s", error)
         sys.exit(1)
 
-    print("=" * 70)
-    print("[IsoCrates] THREE-TIER AUTONOMOUS DOCUMENTATION GENERATOR")
-    print("=" * 70)
-    print(f"Repository: {sanitized_url}")
+    logger.info("%s", "=" * 70)
+    logger.info("[IsoCrates] THREE-TIER AUTONOMOUS DOCUMENTATION GENERATOR")
+    logger.info("%s", "=" * 70)
+    logger.info("Repository: %s", sanitized_url)
     if sanitized_crate:
-        print(f"Crate: {sanitized_crate}")
-    print()
+        logger.info("Crate: %s", sanitized_crate)
+    logger.info("")
 
     # Clone repository
     repos_dir = Path(os.getenv("REPOS_DIR", "./repos"))
@@ -1632,7 +1682,7 @@ Examples:
     try:
         repo_path = clone_repo(sanitized_url, repos_dir)
     except subprocess.CalledProcessError as e:
-        print(f"[Error] Failed to clone repository: {e}")
+        logger.error("[Error] Failed to clone repository: %s", e)
         sys.exit(1)
 
     # Auto-crate detection: when --auto-crates is set and no explicit --crate,
@@ -1640,17 +1690,17 @@ Examples:
     if args.auto_crates and not sanitized_crate:
         crates = detect_crates(repo_path)
         if len(crates) > 1:
-            print(f"[Auto-Crates] Detected {len(crates)} independent sub-projects:")
+            logger.info("[Auto-Crates] Detected %s independent sub-projects:", len(crates))
             for c in crates:
-                print(f"   {c['path']} ({c['marker']})")
-            print()
+                logger.info("   %s (%s)", c['path'], c['marker'])
+            logger.info("")
 
             all_results = {}
             for crate_info in crates:
                 crate_path = crate_info["path"]
-                print(f"\n{'='*70}")
-                print(f"[Auto-Crates] Processing crate: {crate_path}")
-                print(f"{'='*70}")
+                logger.info("\n%s", "=" * 70)
+                logger.info("[Auto-Crates] Processing crate: %s", crate_path)
+                logger.info("%s", "=" * 70)
                 gen = OpenHandsDocGenerator(repo_path, sanitized_url, crate_path)
                 crate_results = gen.generate_all(force=args.force)
                 for title, result in crate_results.items():
@@ -1659,8 +1709,8 @@ Examples:
             results = all_results
         else:
             if crates:
-                print(f"[Auto-Crates] Only 1 sub-project detected ({crates[0]['path']}), "
-                      f"processing as single repo")
+                logger.info("[Auto-Crates] Only 1 sub-project detected (%s), "
+                            "processing as single repo", crates[0]['path'])
             generator = OpenHandsDocGenerator(repo_path, sanitized_url, sanitized_crate)
             results = generator.generate_all(force=args.force) if args.doc_type == "auto" else {}
     else:
@@ -1671,43 +1721,7 @@ Examples:
     if not results and args.doc_type == "auto":
         results = generator.generate_all(force=args.force)
     elif not results:
-        # Single doc mode — run scouts + planner for context, then one writer
-        scout_reports = generator._run_scouts()
-        blueprint = generator._planner_think(scout_reports)
-
-        # Find the requested doc in the blueprint, or build a minimal spec
-        crate_path = f"{sanitized_crate}/{repo_path.name}".strip("/")
-        doc_spec = None
-        for doc in blueprint.get("documents", []):
-            if doc["doc_type"] == args.doc_type:
-                doc_spec = doc
-                break
-
-        if not doc_spec:
-            title = DOCUMENT_TYPES.get(args.doc_type, {}).get(
-                "title", args.doc_type.replace("-", " ").title()
-            )
-            doc_spec = {
-                "doc_type": args.doc_type,
-                "title": title,
-                "path": f"{crate_path}/{args.doc_type}",
-                "sections": [
-                    {"heading": "Overview", "rich_content": []},
-                   ],
-                "key_files_to_read": ["README.md"],
-                "wikilinks_out": [],
-            }
-            blueprint = {
-                "repo_summary": blueprint.get("repo_summary", f"Repository {repo_path.name}"),
-                "complexity": blueprint.get("complexity", "medium"),
-                "documents": [doc_spec],
-            }
-
-        discovery = generator._discover_existing_documents()
-        result = generator.generate_document(
-            doc_spec, blueprint, discovery, scout_reports
-        )
-        results = {doc_spec["title"]: result}
+        results = generator.generate_single(args.doc_type, force=args.force)
 
     # Check for failures and exit with appropriate code.
     # The worker (backend/worker.py) uses the exit code to determine job status:
@@ -1721,25 +1735,25 @@ Examples:
 
     if error_count > 0 and error_count == total_count:
         # All documents failed — hard failure
-        print(f"\n[Error] All {error_count} document(s) failed to generate.", file=sys.stderr)
+        logger.error("\n[Error] All %s document(s) failed to generate.", error_count)
         for title, result in results.items():
             if result.get("status") in ("error", "error_fallback"):
-                print(f"  - {title}: {result.get('error', 'unknown error')}", file=sys.stderr)
+                logger.error("  - %s: %s", title, result.get('error', 'unknown error'))
         sys.exit(1)
 
     if error_count > 0:
         # Partial failure — some succeeded, some failed. Report but exit 0
         # so the worker marks the job completed (partial docs are still useful).
-        print(f"\n[Warning] {error_count}/{total_count} document(s) failed:", file=sys.stderr)
+        logger.error("\n[Warning] %s/%s document(s) failed:", error_count, total_count)
         for title, result in results.items():
             if result.get("status") in ("error", "error_fallback"):
-                print(f"  - {title}: {result.get('error', 'unknown error')}", file=sys.stderr)
+                logger.error("  - %s: %s", title, result.get('error', 'unknown error'))
 
     # Final output
     api_url = os.getenv("DOC_API_URL", "http://localhost:8000")
-    print(f"\n[Info] Documentation available at:")
-    print(f"   API: {api_url}/api/docs")
-    print(f"   Frontend: http://localhost:3000\n")
+    logger.info("\n[Info] Documentation available at:")
+    logger.info("   API: %s/api/docs", api_url)
+    logger.info("   Frontend: http://localhost:3000\n")
 
 
 if __name__ == "__main__":

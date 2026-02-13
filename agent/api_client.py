@@ -15,6 +15,14 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+class APIClientError(Exception):
+    """Raised when the API returns an unrecoverable error."""
+
+    def __init__(self, message: str, status_code: int = 0):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class DocumentAPIClient:
     """Client for interacting with IsoCrates REST API.
 
@@ -81,6 +89,27 @@ class DocumentAPIClient:
                 logger.info("Document posted", extra={"id": result.get("id"), "status": result.get("status", "created")})
                 return result
 
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                logger.warning("HTTP %d: %s", status, exc)
+
+                # Don't retry client errors (except 429 rate limit)
+                if 400 <= status < 500 and status != 429:
+                    logger.error("Client error %d, not retrying", status)
+                    if fallback_path:
+                        return self._fallback_to_file(doc_data, fallback_path)
+                    raise APIClientError(f"API POST failed with {status}: {exc}", status_code=status)
+
+                if attempt < self.max_retries - 1:
+                    wait = (2 ** attempt) * (5 if status == 429 else 1)
+                    logger.info("Retrying in %ds", wait)
+                    time.sleep(wait)
+                else:
+                    logger.error("All %d attempts failed", self.max_retries)
+                    if fallback_path:
+                        return self._fallback_to_file(doc_data, fallback_path)
+                    raise APIClientError(f"API POST failed after {self.max_retries} attempts: {exc}")
+
             except requests.exceptions.RequestException as exc:
                 logger.warning("Request failed: %s: %s", type(exc).__name__, exc)
 
@@ -92,7 +121,7 @@ class DocumentAPIClient:
                     logger.error("All %d attempts failed", self.max_retries)
                     if fallback_path:
                         return self._fallback_to_file(doc_data, fallback_path)
-                    raise Exception(f"API POST failed after {self.max_retries} attempts: {exc}")
+                    raise APIClientError(f"API POST failed after {self.max_retries} attempts: {exc}")
 
     # ----- ID generation (single source of truth is the backend) ----------
 
@@ -295,4 +324,4 @@ class DocumentAPIClient:
             }
         except Exception as exc:
             logger.error("Fallback write failed: %s", exc)
-            raise Exception(f"Both API and file fallback failed: {exc}")
+            raise APIClientError(f"Both API and file fallback failed: {exc}")

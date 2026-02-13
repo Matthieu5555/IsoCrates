@@ -7,6 +7,7 @@ Codex, or any MCP-compatible client.
 
 from typing import Optional
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 from .api_client import IsoCratesClient
@@ -46,8 +47,10 @@ async def search_docs(
     try:
         results = await client.search(query, path_prefix, limit, keywords)
         return format_search_results(results)
-    except Exception as e:
-        return f"Error searching documents: {e}"
+    except httpx.HTTPStatusError as e:
+        return f"API error: {e.response.status_code} — {e.response.text[:200]}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Connection error (is the IsoCrates backend running?): {e}"
 
 
 @mcp.tool()
@@ -72,13 +75,15 @@ async def get_document(title_or_id: str) -> str:
         try:
             doc = await client.get_document(title_or_id)
             return format_document(doc)
-        except Exception:
+        except httpx.HTTPStatusError:
             return (
                 f"Document not found: '{title_or_id}'. "
                 "Use search_docs to find the correct title."
             )
-    except Exception as e:
-        return f"Error retrieving document: {e}"
+    except httpx.HTTPStatusError as e:
+        return f"API error: {e.response.status_code} — {e.response.text[:200]}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Connection error (is the IsoCrates backend running?): {e}"
 
 
 @mcp.tool()
@@ -97,8 +102,10 @@ async def list_documents(
     try:
         docs = await client.list_documents(path_prefix, limit)
         return format_document_list(docs)
-    except Exception as e:
-        return f"Error listing documents: {e}"
+    except httpx.HTTPStatusError as e:
+        return f"API error: {e.response.status_code} — {e.response.text[:200]}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Connection error (is the IsoCrates backend running?): {e}"
 
 
 @mcp.tool()
@@ -123,7 +130,7 @@ async def get_related(title_or_id: str) -> str:
                 doc = await client.get_document(title_or_id)
                 doc_id = title_or_id
                 doc_title = doc.get("title", title_or_id)
-            except Exception:
+            except httpx.HTTPStatusError:
                 return (
                     f"Document not found: '{title_or_id}'. "
                     "Use search_docs to find the correct title."
@@ -143,8 +150,10 @@ async def get_related(title_or_id: str) -> str:
         title_cache = await client.batch_titles(list(all_ids))
 
         return format_related(doc_title, deps, title_cache)
-    except Exception as e:
-        return f"Error getting related documents: {e}"
+    except httpx.HTTPStatusError as e:
+        return f"API error: {e.response.status_code} — {e.response.text[:200]}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Connection error (is the IsoCrates backend running?): {e}"
 
 
 @mcp.tool()
@@ -170,7 +179,7 @@ async def find_similar_docs(
             try:
                 await client.get_document(title_or_id)
                 doc_id = title_or_id
-            except Exception:
+            except httpx.HTTPStatusError:
                 return (
                     f"Document not found: '{title_or_id}'. "
                     "Use search_docs to find the correct title."
@@ -178,8 +187,10 @@ async def find_similar_docs(
 
         results = await client.find_similar(doc_id, limit)
         return format_similar_results(results)
-    except Exception as e:
-        return f"Error finding similar documents: {e}"
+    except httpx.HTTPStatusError as e:
+        return f"API error: {e.response.status_code} — {e.response.text[:200]}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Connection error (is the IsoCrates backend running?): {e}"
 
 
 @mcp.tool()
@@ -203,7 +214,7 @@ async def get_document_sources(title_or_id: str) -> str:
                 doc = await client.get_document(title_or_id)
                 doc_id = title_or_id
                 doc_title = doc.get("title", title_or_id)
-            except Exception:
+            except httpx.HTTPStatusError:
                 return (
                     f"Document not found: '{title_or_id}'. "
                     "Use search_docs to find the correct title."
@@ -211,8 +222,10 @@ async def get_document_sources(title_or_id: str) -> str:
 
         version = await client.get_latest_version(doc_id)
         return format_provenance(doc_title, version)
-    except Exception as e:
-        return f"Error getting document sources: {e}"
+    except httpx.HTTPStatusError as e:
+        return f"API error: {e.response.status_code} — {e.response.text[:200]}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Connection error (is the IsoCrates backend running?): {e}"
 
 
 @mcp.tool()
@@ -233,8 +246,10 @@ async def ask_docs(
     try:
         result = await client.ask(question, top_k)
         return format_ask_response(result)
-    except Exception as e:
-        return f"Error asking question: {e}"
+    except httpx.HTTPStatusError as e:
+        return f"API error: {e.response.status_code} — {e.response.text[:200]}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Connection error (is the IsoCrates backend running?): {e}"
 
 
 @mcp.tool()
@@ -273,8 +288,10 @@ async def create_document(
             keywords=keywords,
         )
         return format_write_result(doc, "Created")
-    except Exception as e:
-        return f"Error creating document: {e}"
+    except httpx.HTTPStatusError as e:
+        return f"API error: {e.response.status_code} — {e.response.text[:200]}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Connection error (is the IsoCrates backend running?): {e}"
 
 
 @mcp.tool()
@@ -305,7 +322,7 @@ async def update_document(
             try:
                 await client.get_document(title_or_id)
                 doc_id = title_or_id
-            except Exception:
+            except httpx.HTTPStatusError:
                 return (
                     f"Document not found: '{title_or_id}'. "
                     "Use search_docs to find the correct title."
@@ -317,8 +334,10 @@ async def update_document(
             description=description,
         )
         return format_write_result(doc, "Updated")
-    except Exception as e:
-        return f"Error updating document: {e}"
+    except httpx.HTTPStatusError as e:
+        return f"API error: {e.response.status_code} — {e.response.text[:200]}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Connection error (is the IsoCrates backend running?): {e}"
 
 
 def main() -> None:

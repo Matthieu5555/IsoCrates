@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { NodeViewContent, NodeViewWrapper } from '@tiptap/react';
+import { NodeViewContent, NodeViewWrapper, type NodeViewProps } from '@tiptap/react';
 import { MermaidBlock } from '@/components/markdown/MermaidBlock';
 
 /**
@@ -10,8 +10,8 @@ import { MermaidBlock } from '@/components/markdown/MermaidBlock';
  *
  * For non-mermaid code blocks, renders the standard code block UI.
  */
-export function MermaidCodeBlockView({ node }: { node: any }) {
-  const language = node.attrs.language as string | null;
+export function MermaidCodeBlockView({ node }: NodeViewProps) {
+  const language = (node.attrs as Record<string, unknown>).language as string | null;
   const isMermaid = language === 'mermaid';
   const textContent = node.textContent as string;
 

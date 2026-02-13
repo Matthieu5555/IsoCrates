@@ -104,7 +104,7 @@ def list_trash(
 
 @router.get("/search/", response_model=List[SearchResultResponse])
 def search_documents(
-    q: str = Query(..., min_length=1),
+    q: str = Query(..., min_length=1, max_length=1000),
     limit: int = Query(20, ge=1, le=100),
     path_prefix: Optional[str] = None,
     keywords: Optional[str] = None,
@@ -144,6 +144,7 @@ def recent_documents(
             content_preview=doc.content_preview,
             updated_at=doc.updated_at,
             generation_count=doc.generation_count,
+            version=doc.version,
             is_indexed=doc.is_indexed,
         )
         for doc in docs

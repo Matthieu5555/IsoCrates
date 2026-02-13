@@ -168,10 +168,17 @@ class AskRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=10)
 
 
+class ChatSource(BaseModel):
+    """A source document cited in a RAG chat answer."""
+    id: str
+    title: str
+    path: str
+
+
 class AskResponse(BaseModel):
     """Response from RAG chat."""
     answer: str
-    sources: List[dict]
+    sources: List[ChatSource]
     model: str
 
 

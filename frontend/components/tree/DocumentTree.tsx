@@ -22,9 +22,14 @@ import { useTreeData } from '@/hooks/useTreeData';
 import { useTreeDragDrop } from '@/hooks/useTreeDragDrop';
 import { useTreeSelection } from '@/hooks/useTreeSelection';
 import { useTreeDialogs } from '@/hooks/useTreeDialogs';
+import { useAuthStore } from '@/lib/store/authStore';
+
+const IS_READ_ONLY_MODE = process.env.NEXT_PUBLIC_READ_ONLY === 'true';
 
 export function DocumentTree() {
   const router = useRouter();
+  const user = useAuthStore((s) => s.user);
+  const readOnly = IS_READ_ONLY_MODE && !user;
 
   // --- Extracted hooks ---
   const {
@@ -98,9 +103,10 @@ export function DocumentTree() {
   }, [handleSelect, router, toggleNode]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, node: TreeNode) => {
+    if (readOnly) return;
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY, node });
-  }, []);
+  }, [readOnly]);
 
   function countDocumentsInTree(node: TreeNode): number {
     if (node.type === 'document') return 1;
@@ -216,27 +222,34 @@ export function DocumentTree() {
       )}
 
       <div className="p-3 border-b border-border flex items-center gap-2">
-        <button
-          onClick={() => handleNewDocClick()}
-          className={`${buttonVariants.iconSmall} flex items-center gap-1 text-xs`}
-          title="New Document"
-        >
-          <Plus className="h-3 w-3" />
-          <FileText className="h-3 w-3" />
-        </button>
-        <button
-          onClick={() => handleNewFolderClick()}
-          className={`${buttonVariants.iconSmall} flex items-center gap-1 text-xs`}
-          title="New Folder"
-        >
-          <Plus className="h-3 w-3" />
-          <Folder className="h-3 w-3" />
-        </button>
+        {!readOnly && (
+          <>
+            <button
+              onClick={() => handleNewDocClick()}
+              className={`${buttonVariants.iconSmall} flex items-center gap-1 text-xs`}
+              title="New Document"
+              aria-label="New Document"
+            >
+              <Plus className="h-3 w-3" />
+              <FileText className="h-3 w-3" />
+            </button>
+            <button
+              onClick={() => handleNewFolderClick()}
+              className={`${buttonVariants.iconSmall} flex items-center gap-1 text-xs`}
+              title="New Folder"
+              aria-label="New Folder"
+            >
+              <Plus className="h-3 w-3" />
+              <Folder className="h-3 w-3" />
+            </button>
+          </>
+        )}
         <div className="flex-1" />
         <button
           onClick={loadTree}
           className={`${buttonVariants.iconSmall} flex items-center gap-1 text-xs`}
           title="Refresh"
+          aria-label="Refresh"
         >
           <RefreshCw className="h-3 w-3" />
         </button>
@@ -257,21 +270,21 @@ export function DocumentTree() {
             node={node}
             level={0}
             expandedNodes={expandedNodes}
-            dropTargetId={dropTargetId}
-            selectedIds={selectedIds}
+            dropTargetId={readOnly ? null : dropTargetId}
+            selectedIds={readOnly ? new Set<string>() : selectedIds}
             generationStatus={generationStatus}
             onNodeClick={handleNodeClick}
-            onContextMenu={handleContextMenu}
-            onDragStart={handleDragStart}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onDragEnd={handleDragEnd}
+            onContextMenu={readOnly ? undefined : handleContextMenu}
+            onDragStart={readOnly ? undefined : handleDragStart}
+            onDragOver={readOnly ? undefined : handleDragOver}
+            onDragLeave={readOnly ? undefined : handleDragLeave}
+            onDrop={readOnly ? undefined : handleDrop}
+            onDragEnd={readOnly ? undefined : handleDragEnd}
           />
         ))}
 
         {/* Visual hint for root drop */}
-        {draggedNode && (
+        {!readOnly && draggedNode && (
           <div className={`mt-2 border-2 border-dashed rounded-lg p-3 text-center text-xs text-muted-foreground transition-colors ${
             rootDropActive ? 'border-primary text-primary' : 'border-border'
           }`}>

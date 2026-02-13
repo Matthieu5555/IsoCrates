@@ -11,8 +11,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv (modern Python package manager)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Create non-root user
+RUN useradd -u 1000 -m agent
 
 # Create workspace
 WORKDIR /workspace
@@ -31,5 +33,10 @@ ENV VIRTUAL_ENV="/opt/venv"
 # Set up git config
 RUN git config --global user.email "agent@autodoc.local" && \
     git config --global user.name "AutoDoc Agent"
+
+# Ensure workspace is writable by agent user
+RUN chown -R agent:agent /workspace
+
+USER agent
 
 CMD ["tail", "-f", "/dev/null"]

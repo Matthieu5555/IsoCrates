@@ -20,12 +20,12 @@ interface TreeNodeRowProps {
   selectedIds: Set<string>;
   generationStatus: Record<string, GenerationJobStatus>;
   onNodeClick: (node: TreeNode, e: React.MouseEvent) => void;
-  onContextMenu: (e: React.MouseEvent, node: TreeNode) => void;
-  onDragStart: (e: React.DragEvent, node: TreeNode) => void;
-  onDragOver: (e: React.DragEvent, node: TreeNode) => void;
-  onDragLeave: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent, node: TreeNode) => void;
-  onDragEnd: (e: React.DragEvent) => void;
+  onContextMenu?: (e: React.MouseEvent, node: TreeNode) => void;
+  onDragStart?: (e: React.DragEvent, node: TreeNode) => void;
+  onDragOver?: (e: React.DragEvent, node: TreeNode) => void;
+  onDragLeave?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent, node: TreeNode) => void;
+  onDragEnd?: (e: React.DragEvent) => void;
 }
 
 function countDocuments(node: TreeNode): number {
@@ -107,6 +107,7 @@ export const TreeNodeRow = memo(function TreeNodeRow({
   const isSelected = selectedIds.has(node.id);
   const hasChildren = node.children && node.children.length > 0;
   const indent = level * INDENT_PER_LEVEL;
+  const draggable = !!onDragStart;
 
   const docCount = useMemo(() => countDocuments(node), [node]);
   const tooltip = useMemo(() => getTooltip(node, docCount), [node, docCount]);
@@ -116,17 +117,17 @@ export const TreeNodeRow = memo(function TreeNodeRow({
       <div>
         <button
           onClick={(e) => onNodeClick(node, e)}
-          onContextMenu={(e) => onContextMenu(e, node)}
-          draggable={true}
-          onDragStart={(e) => onDragStart(e, node)}
-          onDragOver={(e) => onDragOver(e, node)}
+          onContextMenu={onContextMenu ? (e) => onContextMenu(e, node) : undefined}
+          draggable={draggable}
+          onDragStart={onDragStart ? (e) => onDragStart(e, node) : undefined}
+          onDragOver={onDragOver ? (e) => onDragOver(e, node) : undefined}
           onDragLeave={onDragLeave}
-          onDrop={(e) => onDrop(e, node)}
+          onDrop={onDrop ? (e) => onDrop(e, node) : undefined}
           onDragEnd={onDragEnd}
           title={tooltip}
           className={`w-full text-left px-3 py-2 hover:bg-muted rounded text-sm flex items-center gap-2 transition-colors ${
             isDropTarget ? overlayVariants.dropTarget : ''
-          } ${isSelected ? 'bg-primary/10 ring-1 ring-primary/30' : ''} cursor-grab active:cursor-grabbing`}
+          } ${isSelected ? 'bg-primary/10 ring-1 ring-primary/30' : ''} ${draggable ? 'cursor-grab active:cursor-grabbing' : ''}`}
           style={{ paddingLeft: `${indent + NODE_BASE_PADDING}px` }}
         >
           {hasChildren && (

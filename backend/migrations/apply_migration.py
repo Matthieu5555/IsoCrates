@@ -5,7 +5,6 @@ Usage: python apply_migration.py <migration_file.sql>
 """
 import sys
 import sqlite3
-import os
 from pathlib import Path
 
 # Find database file
@@ -13,7 +12,7 @@ DB_PATH = Path(__file__).parent.parent / "isocrates.db"
 
 def apply_migration(migration_file: str):
     """Apply a SQL migration file to the database."""
-    if not os.path.exists(migration_file):
+    if not Path(migration_file).exists():
         print(f"Error: Migration file not found: {migration_file}")
         sys.exit(1)
 

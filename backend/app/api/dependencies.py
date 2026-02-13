@@ -14,20 +14,39 @@ from ..services.permission_service import check_permission
 router = APIRouter(prefix="/api/docs/{doc_id}/dependencies", tags=["dependencies"])
 
 
+def _doc_path(db: Session, doc_id: str) -> str:
+    """Look up a document's path for permission checking."""
+    from ..models import Document
+    row = db.query(Document.path).filter(Document.id == doc_id).first()
+    return row[0] if row else ""
+
+
 @router.get("", response_model=DocumentDependencies)
 def get_dependencies(
     doc_id: str,
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(optional_auth),
 ):
-    """Get all dependencies for a document (incoming and outgoing)."""
+    """Get all dependencies for a document (incoming and outgoing).
+
+    Filters results to only include dependencies where the linked document
+    is accessible to the current user.
+    """
     from ..services import DocumentService
+    from ..services.permission_service import filter_paths_by_grants
 
     service = DocumentService(db)
     service.get_document_authorized(doc_id, auth.grants, "read")
 
     dep_service = DependencyService(db)
-    return dep_service.get_dependencies(doc_id)
+    deps = dep_service.get_dependencies(doc_id)
+
+    allowed_prefixes = filter_paths_by_grants(auth.grants)
+    if "" not in allowed_prefixes:
+        deps.outgoing = [d for d in deps.outgoing if check_permission(auth.grants, _doc_path(db, d.to_doc_id), "read")]
+        deps.incoming = [d for d in deps.incoming if check_permission(auth.grants, _doc_path(db, d.from_doc_id), "read")]
+
+    return deps
 
 
 @router.post("", response_model=DependencyResponse, status_code=201)

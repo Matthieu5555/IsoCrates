@@ -2,9 +2,9 @@
 
 import sqlite3
 import sys
-import os
+from pathlib import Path
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "isocrates.db")
+DB_PATH = str(Path(__file__).parent / "isocrates.db")
 
 
 def migrate(db_path: str = DB_PATH):
