@@ -24,7 +24,13 @@ class IsoCratesClient:
     """
 
     def __init__(self) -> None:
-        self.base_url = os.environ.get("ISOCRATES_API_URL", "http://localhost:8000")
+        self.base_url = os.environ.get("ISOCRATES_API_URL")
+        if not self.base_url:
+            raise RuntimeError(
+                "ISOCRATES_API_URL not set. "
+                "Set it to the IsoCrates backend base URL "
+                "(e.g. http://localhost:8001 or https://your-domain.com/api)."
+            )
         self.token = os.environ.get("ISOCRATES_API_TOKEN", "")
         self.timeout = float(os.environ.get("ISOCRATES_API_TIMEOUT", "30"))
         self._client: Optional[httpx.AsyncClient] = None

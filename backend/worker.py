@@ -32,19 +32,42 @@ POLL_INTERVAL = 10
 # Seconds between daily refresh checks (24 hours)
 DAILY_REFRESH_INTERVAL = int(os.getenv("DAILY_REFRESH_INTERVAL", str(24 * 60 * 60)))
 
-# Path to the agent script
-AGENT_SCRIPT = os.getenv("AGENT_SCRIPT_PATH", "/workspace/openhands_doc.py")
-
 # How to invoke the agent: "local" runs subprocess directly,
-# "docker" execs into the doc-agent container
-AGENT_MODE = os.getenv("AGENT_MODE", "docker")
+# "docker" execs into the doc-agent container.
+# No default — must be explicitly set so the worker doesn't silently
+# use the wrong execution mode.
+AGENT_MODE = os.getenv("AGENT_MODE")
+if not AGENT_MODE:
+    raise SystemExit(
+        "AGENT_MODE not set. Must be 'local' or 'docker'.\n"
+        "  local  — runs agent as a subprocess (requires agent dependencies installed)\n"
+        "  docker — runs agent via 'docker exec' into a container"
+    )
+if AGENT_MODE not in ("local", "docker"):
+    raise SystemExit(f"AGENT_MODE={AGENT_MODE!r} is invalid. Must be 'local' or 'docker'.")
+
+# Path to the agent script — no default; prevents silently running wrong script.
+AGENT_SCRIPT = os.getenv("AGENT_SCRIPT_PATH")
+if not AGENT_SCRIPT:
+    raise SystemExit(
+        "AGENT_SCRIPT_PATH not set. Point it at the agent entry point.\n"
+        "  Example: AGENT_SCRIPT_PATH=/path/to/openhands_doc.py"
+    )
+
+# Container name for docker mode — required when AGENT_MODE=docker.
+AGENT_CONTAINER = os.getenv("AGENT_CONTAINER", "")
+if AGENT_MODE == "docker" and not AGENT_CONTAINER:
+    raise SystemExit(
+        "AGENT_CONTAINER not set but AGENT_MODE=docker.\n"
+        "  Set AGENT_CONTAINER to the name of the running agent container.\n"
+        "  Example: AGENT_CONTAINER=doc-agent"
+    )
 
 # Maximum seconds a single generation job can run before being killed.
 # Large repos with many documents may need up to 20-30 minutes.
-# Used by: _run_job() subprocess call. Changing this affects how long
+# Used by: process_job() subprocess call. Changing this affects how long
 # the worker waits before declaring a job timed out.
 JOB_TIMEOUT_SECONDS = 1800  # 30 minutes
-AGENT_CONTAINER = os.getenv("AGENT_CONTAINER", "doc-agent")
 
 logging.basicConfig(
     level=logging.INFO,

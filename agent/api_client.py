@@ -38,7 +38,13 @@ class DocumentAPIClient:
         api_url: Optional[str] = None,
         api_token: Optional[str] = None,
     ):
-        self.api_url = api_url or os.getenv("DOC_API_URL", "http://backend-api:8000")
+        self.api_url = api_url or os.getenv("DOC_API_URL")
+        if not self.api_url:
+            raise APIClientError(
+                "DOC_API_URL not set and no api_url argument provided. "
+                "Set DOC_API_URL to the IsoCrates backend base URL "
+                "(e.g. http://backend-api:8000 or http://localhost:8001)."
+            )
         self.api_token = api_token or os.getenv("DOC_API_TOKEN", "")
         self.max_retries = 3
         self.timeout = 30
