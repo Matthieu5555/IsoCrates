@@ -83,13 +83,6 @@ def _validate_database_connection() -> None:
                     f"  DATABASE_URL: {masked}\n"
                     f"  Error: {error_str}"
                 )
-        elif DATABASE_URL.startswith("sqlite"):
-            logger.critical(
-                f"SQLite database error.\n"
-                f"  DATABASE_URL: {masked}\n"
-                "  Check that the directory exists and is writable.\n"
-                f"  Error: {error_str}"
-            )
         else:
             logger.critical(
                 f"Database connection failed.\n"
@@ -233,12 +226,15 @@ app.add_middleware(RequestContextMiddleware)
 app.add_exception_handler(IsoException, iso_exception_handler)
 
 # Log startup summary — gives deployers a quick overview of what's configured.
-db_type = "PostgreSQL" if DATABASE_URL.startswith("postgresql") else "SQLite"
+# This single log line should make misconfiguration obvious at a glance.
 logger.info(
-    "IsoCrates API started | env=%s | db=%s | auth=%s | cors=%s",
+    "IsoCrates API started | env=%s | db=%s(%s) | auth=%s | public_read=%s | embeddings=%s | cors=%s",
     settings.environment.value,
-    db_type,
-    "enabled" if settings.auth_enabled else "disabled",
+    "PostgreSQL",
+    _mask_url(DATABASE_URL),
+    "enabled" if settings.auth_enabled else "DISABLED",
+    settings.public_read,
+    settings.embedding_model or "disabled",
     ",".join(settings.get_cors_origins()),
 )
 
@@ -274,6 +270,9 @@ def health_check(db: Session = Depends(get_db)):
 
     Never raises — returns degraded status on DB failure so load balancers
     can still probe without receiving 5xx.
+
+    Includes masked db_host so operators can immediately verify the correct
+    database is connected.
     """
     db_status = "ok"
     document_count = 0
@@ -284,9 +283,16 @@ def health_check(db: Session = Depends(get_db)):
     except Exception:
         db_status = "error"
 
+    # Show host:port/dbname but never credentials
+    from urllib.parse import urlparse
+    parsed = urlparse(DATABASE_URL)
+    db_host = f"{parsed.hostname}:{parsed.port or 5432}/{parsed.path.lstrip('/')}"
+
     return {
         "status": "healthy" if db_status == "ok" else "degraded",
         "db": db_status,
+        "db_backend": "postgresql",
+        "db_host": db_host,
         "uptime_seconds": round(time.monotonic() - _startup_time),
         "version": "1.0.0",
         "document_count": document_count,

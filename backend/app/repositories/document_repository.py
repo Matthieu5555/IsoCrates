@@ -14,7 +14,6 @@ from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from ..models import Document
 from ..schemas.document import DocumentCreate, DocumentUpdate, SearchResultResponse, SimilarDocumentResponse
-from ..database import is_postgresql
 from ..exceptions import DocumentNotFoundError
 from .base import BaseRepository
 
@@ -169,7 +168,12 @@ class DocumentRepository(BaseRepository[Document]):
                 "     updated_at = CURRENT_TIMESTAMP"
             )
             if document.description is not None:
-                sql += ", description = :description, embedding_model = NULL"
+                # Only invalidate the embedding when description actually changed
+                current = self.get_by_id_optional(doc_id)
+                description_changed = current is None or current.description != document.description
+                sql += ", description = :description"
+                if description_changed:
+                    sql += ", embedding_model = NULL"
                 params["description"] = document.description
 
             sql += " WHERE id = :doc_id AND version = :expected_version"
@@ -187,6 +191,10 @@ class DocumentRepository(BaseRepository[Document]):
         else:
             # No version check — ORM-style update (used by internal operations)
             db_document = self.get_by_id(doc_id)
+            description_changed = (
+                document.description is not None
+                and db_document.description != document.description
+            )
             db_document.content = document.content
             db_document.content_preview = generate_content_preview(document.content)
             db_document.generation_count += 1
@@ -194,7 +202,8 @@ class DocumentRepository(BaseRepository[Document]):
 
             if document.description is not None:
                 db_document.description = document.description
-                db_document.embedding_model = None
+                if description_changed:
+                    db_document.embedding_model = None
 
             self.db.flush()
             self.db.refresh(db_document)
@@ -262,8 +271,8 @@ class DocumentRepository(BaseRepository[Document]):
         return count
 
     def search(self, query: str, limit: int = 20, allowed_prefixes: Optional[list[str]] = None) -> List[Document]:
-        """Simple LIKE search fallback (excludes soft-deleted)."""
-        q = self._base_query().filter(Document.content.contains(query))
+        """Simple ILIKE search fallback (excludes soft-deleted)."""
+        q = self._base_query().filter(Document.content.ilike(f"%{query}%"))
         if allowed_prefixes is not None:
             q = q.filter(self._grant_filter(allowed_prefixes))
         return q.limit(limit).all()
@@ -280,21 +289,16 @@ class DocumentRepository(BaseRepository[Document]):
     ) -> list[SearchResultResponse]:
         """Full-text search with ranking and snippets.
 
-        Uses PostgreSQL tsvector/tsquery or SQLite FTS5 depending on database.
-        Falls back to LIKE search if FTS is not available.
+        Uses PostgreSQL tsvector/tsquery. Falls back to LIKE search if FTS
+        index is not available.
         """
         # When filtering by keywords in Python (post-SQL), over-fetch so that
         # discarded rows don't reduce the final result count below `limit`.
         sql_limit = min(limit * 5, 200) if keywords else limit
 
-        if is_postgresql():
-            return self._search_fts_postgresql(
-                query, sql_limit, path_prefix, keywords, date_from, date_to, allowed_prefixes, limit
-            )
-        else:
-            return self._search_fts_sqlite(
-                query, sql_limit, path_prefix, keywords, date_from, date_to, allowed_prefixes, limit
-            )
+        return self._search_fts_postgresql(
+            query, sql_limit, path_prefix, keywords, date_from, date_to, allowed_prefixes, limit
+        )
 
     def _search_fts_postgresql(
         self,
@@ -362,102 +366,29 @@ class DocumentRepository(BaseRepository[Document]):
             rows = self.db.execute(text(sql), params).fetchall()
             return self._process_fts_results(rows, keywords, final_limit or limit)
 
-        except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError):
-            # Fall back to LIKE search
-            return self._fallback_like_search(query, final_limit or limit, allowed_prefixes)
-
-    def _search_fts_sqlite(
-        self,
-        query: str,
-        limit: int,
-        path_prefix: Optional[str],
-        keywords: Optional[list],
-        date_from: Optional[datetime],
-        date_to: Optional[datetime],
-        allowed_prefixes: Optional[list[str]],
-        final_limit: Optional[int] = None,
-    ) -> list[SearchResultResponse]:
-        """SQLite FTS5 full-text search."""
-        try:
-            # Build FTS5 query with prefix matching
-            fts_query = query.strip()
-            if fts_query and not any(c in fts_query for c in ['"', '*', 'OR', 'AND', 'NOT']):
-                terms = fts_query.split()
-                fts_query = ' '.join(f'"{t}"*' for t in terms if t)
-
-            sql = """
-                SELECT
-                    d.id, d.title, d.path, d.doc_type, d.keywords, d.repo_name,
-                    d.content_preview, d.updated_at, d.generation_count,
-                    bm25(documents_fts) as rank,
-                    snippet(documents_fts, 2, '<mark>', '</mark>', '...', 40) as snippet,
-                    d.description
-                FROM documents_fts fts
-                JOIN documents d ON d.id = fts.doc_id
-                WHERE documents_fts MATCH :query
-                AND d.deleted_at IS NULL
-            """
-            params: dict = {"query": fts_query, "limit": limit}
-
-            if path_prefix:
-                sql += " AND (d.path = :path_prefix OR d.path LIKE :path_like)"
-                params["path_prefix"] = path_prefix
-                params["path_like"] = f"{path_prefix}/%"
-
-            if allowed_prefixes is not None and "" not in allowed_prefixes:
-                if not allowed_prefixes:
-                    return []
-                grant_clauses = []
-                for i, prefix in enumerate(allowed_prefixes):
-                    p_exact = f":gp_exact_{i}"
-                    p_like = f":gp_like_{i}"
-                    grant_clauses.append(f"(d.path = {p_exact} OR d.path LIKE {p_like})")
-                    params[f"gp_exact_{i}"] = prefix
-                    params[f"gp_like_{i}"] = f"{prefix}/%"
-                sql += f" AND ({' OR '.join(grant_clauses)})"
-
-            if date_from:
-                sql += " AND d.updated_at >= :date_from"
-                params["date_from"] = date_from.isoformat()
-
-            if date_to:
-                sql += " AND d.updated_at <= :date_to"
-                params["date_to"] = date_to.isoformat()
-
-            sql += " ORDER BY rank LIMIT :limit"
-
-            rows = self.db.execute(text(sql), params).fetchall()
-            return self._process_fts_results(rows, keywords, final_limit or limit)
-
-        except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError):
-            # FTS5 table may not exist yet — fall back to LIKE search
+        except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError, sqlalchemy.exc.InternalError):
+            # FTS query failed — rollback the aborted transaction so the
+            # session is usable again, then fall back to LIKE search.
+            self.db.rollback()
             return self._fallback_like_search(query, final_limit or limit, allowed_prefixes)
 
     def _process_fts_results(self, rows, keywords: Optional[list], final_limit: int = 20) -> list[SearchResultResponse]:
         """Process FTS result rows into typed response objects.
 
-        Both PostgreSQL and SQLite FTS queries SELECT the same column order:
+        FTS queries SELECT the following column order:
         id, title, path, doc_type, keywords, repo_name, content_preview,
         updated_at, generation_count, rank, snippet, description.
 
         When keyword filtering is active, SQL over-fetches and this method
         trims to ``final_limit`` after filtering.
         """
-        import json
-
         results: list[SearchResultResponse] = []
         for row in rows:
             doc_id, title, path, doc_type, raw_keywords, repo_name = row[0], row[1], row[2], row[3], row[4], row[5]
             content_preview, updated_at, generation_count, rank, snippet = row[6], row[7], row[8], row[9], row[10]
             description = row[11] if len(row) > 11 else None
 
-            # Keywords may come as JSON string (SQLite) or native list (PostgreSQL)
-            doc_keywords = raw_keywords
-            if isinstance(doc_keywords, str):
-                try:
-                    doc_keywords = json.loads(doc_keywords)
-                except (json.JSONDecodeError, TypeError):
-                    doc_keywords = []
+            doc_keywords = raw_keywords or []
 
             # Apply keyword filter in Python (simpler than SQL JSON filtering)
             if keywords:
@@ -515,25 +446,16 @@ class DocumentRepository(BaseRepository[Document]):
     # -- Embedding methods --------------------------------------------------
 
     def update_embedding(self, doc_id: str, embedding: list[float], model_name: str) -> None:
-        """Store embedding vector and model name for a document.
-
-        For PostgreSQL: writes to description_embedding (vector column) + embedding_model.
-        For SQLite: only writes embedding_model (no vector column).
-        """
-        if is_postgresql():
-            self.db.execute(
-                text("""
-                    UPDATE documents
-                    SET description_embedding = :embedding::vector,
-                        embedding_model = :model
-                    WHERE id = :doc_id
-                """),
-                {"embedding": str(embedding), "model": model_name, "doc_id": doc_id},
-            )
-        else:
-            # SQLite has no vector column — just track the model name
-            doc = self.get_by_id(doc_id)
-            doc.embedding_model = model_name
+        """Store embedding vector and model name for a document."""
+        self.db.execute(
+            text("""
+                UPDATE documents
+                SET description_embedding = CAST(:embedding AS vector),
+                    embedding_model = :model
+                WHERE id = :doc_id
+            """),
+            {"embedding": str(embedding), "model": model_name, "doc_id": doc_id},
+        )
         self.db.flush()
 
     def search_by_vector(
@@ -543,14 +465,11 @@ class DocumentRepository(BaseRepository[Document]):
         exclude_id: str | None = None,
         allowed_prefixes: list[str] | None = None,
     ) -> list[SimilarDocumentResponse]:
-        """Find documents by cosine similarity. PostgreSQL only (pgvector)."""
-        if not is_postgresql():
-            return []
-
+        """Find documents by cosine similarity using pgvector."""
         try:
             sql = """
                 SELECT d.id, d.title, d.path, d.description,
-                       1 - (d.description_embedding <=> :embedding::vector) as similarity
+                       1 - (d.description_embedding <=> CAST(:embedding AS vector)) as similarity
                 FROM documents d
                 WHERE d.description_embedding IS NOT NULL
                 AND d.deleted_at IS NULL
@@ -571,7 +490,7 @@ class DocumentRepository(BaseRepository[Document]):
                     params[f"gp_like_{i}"] = f"{prefix}/%"
                 sql += f" AND ({' OR '.join(grant_clauses)})"
 
-            sql += " ORDER BY d.description_embedding <=> :embedding::vector LIMIT :limit"
+            sql += " ORDER BY d.description_embedding <=> CAST(:embedding AS vector) LIMIT :limit"
 
             rows = self.db.execute(text(sql), params).fetchall()
             return [

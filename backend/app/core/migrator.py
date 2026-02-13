@@ -16,9 +16,7 @@ Usage:
 
 import logging
 import re
-import shutil
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -39,7 +37,7 @@ class Migration:
     version: str        # "001", "010"
     name: str           # "make_repo_fields_optional"
     file_path: Path     # Full path to .sql file
-    dialect: Optional[str] = None  # None = universal, "sqlite" or "postgresql"
+    dialect: Optional[str] = None  # None = universal, "postgresql" = PG-only
 
     def __lt__(self, other: "Migration") -> bool:
         """Sort by version number."""
@@ -52,13 +50,12 @@ class MigrationResult:
     applied: int = 0
     skipped: int = 0
     baselined: int = 0
-    backup_path: Optional[Path] = None
 
 
 # Regex to parse migration filenames like "001_make_repo_fields_optional.sql"
 _MIGRATION_PATTERN = re.compile(r"^(\d{3})_(.+)\.sql$")
 
-# Regex to parse dialect marker from first line: "-- dialect: sqlite" or "-- dialect: postgresql"
+# Regex to parse dialect marker from first line: "-- dialect: postgresql"
 _DIALECT_PATTERN = re.compile(r"^--\s*dialect:\s*(sqlite|postgresql)\s*$")
 
 
@@ -90,7 +87,7 @@ def _discover_migration_files() -> list[Migration]:
             version = match.group(1)
             name = match.group(2)
 
-            # Check first line for dialect marker (e.g., "-- dialect: sqlite")
+            # Check first line for dialect marker (e.g., "-- dialect: postgresql")
             dialect = None
             first_line = file_path.read_text().split("\n", 1)[0]
             dialect_match = _DIALECT_PATTERN.match(first_line)
@@ -147,9 +144,8 @@ _MIGRATION_CHECKS = {
     "007": lambda s: "folder_grants" in s["tables"],
     # Later migrations add specific features
     "008": lambda s: "version" in s["doc_columns"],
-    # SQLite: check for FTS5 virtual table; PostgreSQL: check for GIN index.
-    # Both are created by dialect-specific variants of migration 010.
-    "010": lambda s: "documents_fts" in s["tables"] or s.get("has_fts_index", False),
+    # PostgreSQL: check for GIN FTS index created by migration 010.
+    "010": lambda s: s.get("has_fts_index", False),
 }
 
 
@@ -226,16 +222,7 @@ def _apply_migration(engine: Engine, migration: Migration) -> None:
 
     with engine.connect() as conn:
         try:
-            # Execute the migration SQL
-            # Note: executescript is SQLite-specific; for PostgreSQL we use execute
-            if engine.dialect.name == "sqlite":
-                # SQLite: use executescript for multi-statement SQL
-                raw_conn = conn.connection.dbapi_connection
-                raw_conn.executescript(sql_content)
-            else:
-                # PostgreSQL: execute directly (handles transactions internally)
-                conn.execute(text(sql_content))
-
+            conn.execute(text(sql_content))
             conn.commit()
         except SQLAlchemyError as e:
             raise MigrationError(f"Failed to apply {migration.version}_{migration.name}: {e}") from e
@@ -249,30 +236,6 @@ def _baseline_migrations(engine: Engine, migrations: list[Migration]) -> None:
     for migration in migrations:
         _record_migration(engine, migration)
         logger.debug(f"Baselined migration {migration.version}: {migration.name}")
-
-
-def _backup_database(engine: Engine) -> Optional[Path]:
-    """Create timestamped backup of SQLite database.
-
-    Returns backup path, or None for PostgreSQL (logs warning instead).
-    """
-    if engine.dialect.name != "sqlite":
-        logger.info("PostgreSQL detected - skipping auto-backup. Use pg_dump for backups.")
-        return None
-
-    # Extract database path from connection URL
-    db_url = str(engine.url)
-    if db_url.startswith("sqlite:///"):
-        db_path = Path(db_url.replace("sqlite:///", ""))
-        if db_path.exists():
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = db_path.with_suffix(f".{timestamp}.backup")
-
-            logger.info(f"Creating backup: {backup_path}")
-            shutil.copy2(db_path, backup_path)
-            return backup_path
-
-    return None
 
 
 def run_migrations(engine: Engine, base: type) -> MigrationResult:
@@ -291,17 +254,16 @@ def run_migrations(engine: Engine, base: type) -> MigrationResult:
     logger.info("Starting migration check")
 
     all_migrations = _discover_migration_files()
-    db_dialect = engine.dialect.name  # "sqlite" or "postgresql"
 
-    # Filter out migrations targeted at a different dialect.
-    # dialect=None means universal (runs on both), dialect="sqlite" means SQLite-only, etc.
+    # Keep universal migrations (dialect=None) and postgresql-specific ones.
+    # Skip migrations targeted at other dialects.
     migrations = [
         m for m in all_migrations
-        if m.dialect is None or m.dialect == db_dialect
+        if m.dialect is None or m.dialect == "postgresql"
     ]
-    skipped_dialect = len(all_migrations) - len(migrations)
-    if skipped_dialect:
-        logger.info(f"Skipped {skipped_dialect} migration(s) for other dialects (running on {db_dialect})")
+    skipped = len(all_migrations) - len(migrations)
+    if skipped:
+        logger.info(f"Skipped {skipped} non-postgresql migration(s)")
     logger.debug(f"Discovered {len(migrations)} applicable migration files")
 
     # Phase 1: Detect install state
@@ -350,9 +312,6 @@ def run_migrations(engine: Engine, base: type) -> MigrationResult:
 
     logger.info(f"Found {len(pending)} pending migration(s)")
 
-    # Backup before applying (SQLite only)
-    backup_path = _backup_database(engine)
-
     # Apply pending migrations
     applied_count = 0
     for migration in pending:
@@ -362,4 +321,4 @@ def run_migrations(engine: Engine, base: type) -> MigrationResult:
         logger.info(f"Applied migration {migration.version}")
 
     logger.info(f"Applied {applied_count} migration(s) successfully")
-    return MigrationResult(applied=applied_count, backup_path=backup_path)
+    return MigrationResult(applied=applied_count)

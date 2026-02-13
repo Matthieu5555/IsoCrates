@@ -1,53 +1,70 @@
 """Shared test fixtures for the IsoCrates backend test suite.
 
-All tests use an in-memory SQLite database so they are fast, isolated, and
-leave no artefacts. The ``client`` fixture provides a ``TestClient`` wired
-to the real FastAPI app with the DB dependency overridden.
+All tests use a PostgreSQL test database (isocrates_test). Each test gets
+a clean database via TRUNCATE, ensuring complete isolation.
 
-Each test gets its own engine and connection via StaticPool, guaranteeing
-complete isolation. StaticPool ensures all ORM sessions for that test share
-one connection (required for in-memory SQLite).
+The app's migrator handles table creation and migrations automatically on
+import, so no explicit create_all is needed here.
+
+Requires: a local PostgreSQL with the isocrates_test database created:
+  createdb -U isocrates isocrates_test
+  psql -U superuser isocrates_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
 """
 
 import os
 
-# Force auth off and use in-memory DB before any app imports.
-os.environ["DATABASE_URL"] = "sqlite://"
+# Force auth off and use the test database before any app imports.
+os.environ["DATABASE_URL"] = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql://isocrates:isocrates@localhost:5432/isocrates_test",
+)
 os.environ["AUTH_ENABLED"] = "false"
 os.environ["LOG_FORMAT"] = "text"
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import text
 from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
-from app.database import Base, get_db
+from app.database import Base, get_db, engine, SessionLocal
 from app.main import app
 from app.core.token_factory import create_token
 from app.core.config import settings
 from app.middleware.request_context import _rate_buckets
 
+# Tables to truncate between tests (order matters for foreign keys).
+_TRUNCATE_TABLES = [
+    "personal_document_refs", "personal_folders",
+    "dependencies", "versions", "folder_grants", "folder_metadata",
+    "generation_jobs", "audit_log", "documents",
+]
+
+
+@pytest.fixture(autouse=True)
+def _clean_tables():
+    """Truncate all data tables before each test for isolation.
+
+    Uses TRUNCATE CASCADE which is fast and resets sequences.
+    Runs before the test (not after) so test failures leave data
+    available for debugging.
+    """
+    db = SessionLocal()
+    try:
+        db.execute(text(
+            f"TRUNCATE {', '.join(_TRUNCATE_TABLES)} RESTART IDENTITY CASCADE"
+        ))
+        db.commit()
+    finally:
+        db.close()
+    yield
+
 
 @pytest.fixture()
 def db():
-    """Per-test database session on a fresh in-memory database.
-
-    Creates a new engine with StaticPool per test, ensuring complete
-    isolation. StaticPool guarantees all connections share one underlying
-    SQLite connection (required because in-memory SQLite databases are
-    per-connection).
-    """
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine)
-    session = Session(bind=engine)
+    """Per-test database session."""
+    session = SessionLocal()
     yield session
     session.close()
-    engine.dispose()
 
 
 @pytest.fixture()

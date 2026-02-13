@@ -37,12 +37,12 @@ class Settings(BaseSettings):
         description="Allowed CORS origins (comma-separated)"
     )
 
-    # Database Configuration
+    # Database Configuration — no default; must be explicitly set via DATABASE_URL
+    # env var or .env file. Prevents silent fallback to wrong database.
     database_url: str = Field(
-        default="sqlite:///./isocrates.db",
-        description="Database connection URL"
+        description="PostgreSQL connection URL (e.g. postgresql://user:pass@host:5432/isocrates)"
     )
-    # Connection pool tuning (PostgreSQL only; ignored for SQLite).
+    # Connection pool tuning.
     # Each persistent connection uses ~5-10 MB on the server.
     db_pool_size: int = Field(
         default=5,

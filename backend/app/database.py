@@ -1,45 +1,30 @@
-"""Database configuration and session management."""
+"""Database configuration and session management.
 
-from sqlalchemy import create_engine, event
+PostgreSQL is the only supported database. The connection URL must be set via
+DATABASE_URL in the environment or .env file.
+"""
+
+from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import os
 
-# Database URL - start with SQLite for POC, can switch to PostgreSQL later
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./isocrates.db")
+# Single source of truth: pydantic settings (reads from env vars + .env file).
+# No silent fallback — if DATABASE_URL is missing, Settings() raises immediately.
+from .core.config import settings as _settings
 
+DATABASE_URL = _settings.database_url
 
-def is_postgresql() -> bool:
-    """Check if the configured database is PostgreSQL."""
-    return DATABASE_URL.startswith("postgresql")
-
-# Create engine with database-specific tuning.
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(
-        DATABASE_URL,
-        connect_args={"check_same_thread": False}
-    )
-
-    # SQLite defaults foreign_keys to OFF — CASCADE constraints are silently
-    # ignored unless we enable them on every connection.
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragma(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-else:
-    # PostgreSQL: connection pool sized for typical web workloads.
-    # All pool parameters are configurable via DB_POOL_* environment variables.
-    from .core.config import settings as _db_settings
-    engine = create_engine(
-        DATABASE_URL,
-        pool_size=_db_settings.db_pool_size,
-        max_overflow=_db_settings.db_max_overflow,
-        pool_timeout=_db_settings.db_pool_timeout,
-        pool_recycle=_db_settings.db_pool_recycle,
-        # Detects stale connections before use (prevents "server closed the connection" errors).
-        pool_pre_ping=True,
-    )
+# PostgreSQL connection pool sized for typical web workloads.
+# All pool parameters are configurable via DB_POOL_* environment variables.
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=_settings.db_pool_size,
+    max_overflow=_settings.db_max_overflow,
+    pool_timeout=_settings.db_pool_timeout,
+    pool_recycle=_settings.db_pool_recycle,
+    # Detects stale connections before use (prevents "server closed the connection" errors).
+    pool_pre_ping=True,
+)
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
