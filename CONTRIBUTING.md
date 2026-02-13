@@ -80,7 +80,7 @@ npm run test
 
 ## Code style
 
-See `ARCHITECTURE.md` for detailed coding conventions. Key points:
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for detailed coding conventions. Key points:
 
 - **Backend:** Follow the deep module pattern — business logic lives in services, endpoints are thin (5-15 lines)
 - **Frontend:** Use Tailwind CSS via variant objects from `lib/styles/`, no inline styles

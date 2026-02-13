@@ -49,7 +49,7 @@ Frontend at `localhost:3000`, API at `localhost:8000`, interactive docs at `loca
 The interactive deploy script handles secrets, Caddyfile generation, and TLS:
 
 ```bash
-./deploy.sh
+./scripts/deploy.sh
 ```
 
 Or manually:
@@ -99,10 +99,10 @@ curl https://your-domain.com/health
 
 | Document | Purpose |
 |----------|---------|
-| [Architecture](ARCHITECTURE.md) | System design, data model, security model |
+| [Architecture](docs/ARCHITECTURE.md) | System design, data model, security model |
 | [Deployment Guide](docs/DEPLOYING_AT_YOUR_ORGANIZATION.md) | Production setup: secrets, auth, webhooks, database, security checklist |
-| [Usage Guide](USAGE_GUIDE.md) | Folders, documents, search, personal trees, API examples |
-| [Changelog](CHANGELOG.md) | Version history and release notes |
+| [Usage Guide](docs/USAGE_GUIDE.md) | Folders, documents, search, personal trees, API examples |
+| [Changelog](docs/CHANGELOG.md) | Version history and release notes |
 | [Further Development](docs/FURTHER_DEVELOPMENT.md) | Roadmap and open tasks |
 
 ## Troubleshooting

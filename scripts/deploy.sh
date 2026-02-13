@@ -8,8 +8,8 @@ set -euo pipefail
 # Re-running is safe — existing .env.production values are preserved.
 #
 # Usage:
-#   ./deploy.sh                     Interactive setup
-#   DOMAIN=docs.example.com ./deploy.sh   Non-interactive (pre-set domain)
+#   ./scripts/deploy.sh                     Interactive setup
+#   DOMAIN=docs.example.com ./scripts/deploy.sh   Non-interactive (pre-set domain)
 # =============================================================================
 
 RED='\033[0;31m'

@@ -45,7 +45,7 @@ The following are out of scope:
 
 ## Security architecture
 
-IsoCrates has several built-in security mechanisms documented in `ARCHITECTURE.md`:
+IsoCrates has several built-in security mechanisms documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md):
 
 - JWT authentication with HMAC-SHA256
 - Path-based folder grants for authorization

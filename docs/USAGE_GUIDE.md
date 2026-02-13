@@ -338,4 +338,4 @@ In development (`AUTH_ENABLED=false`, the default), no token is needed and all d
 
 ## Getting Help
 
-For deeper understanding of the system, consult [ARCHITECTURE.md](ARCHITECTURE.md), which covers system design and coding standards. If you need guidance on setup, deployment, or configuration, see [docs/DEPLOYING_AT_YOUR_ORGANIZATION.md](docs/DEPLOYING_AT_YOUR_ORGANIZATION.md). Migration-specific details are available in `backend/migrations/README.md`.
+For deeper understanding of the system, consult [ARCHITECTURE.md](ARCHITECTURE.md), which covers system design and coding standards. If you need guidance on setup, deployment, or configuration, see [DEPLOYING_AT_YOUR_ORGANIZATION.md](DEPLOYING_AT_YOUR_ORGANIZATION.md). Migration-specific details are available in `backend/migrations/README.md`.

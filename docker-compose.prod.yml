@@ -1,7 +1,7 @@
 # Production overrides for IsoCrates
 #
 # Usage:
-#   ./deploy.sh                                          (interactive)
+#   ./scripts/deploy.sh                                   (interactive)
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d
 #
 # Adds Caddy reverse proxy for automatic HTTPS, overrides dev defaults

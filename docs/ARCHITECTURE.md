@@ -6,20 +6,24 @@ IsoCrates is an AI-powered technical documentation platform built around three c
 
 Because the frontend and backend communicate exclusively through a validated CORS-enabled REST API, each layer can evolve independently. The backend's service layer encapsulates all business logic so that API endpoints remain thin, and the SQLite database stores documents, versions, dependencies, folder metadata, users, and the personal organization tables. The agent, in turn, connects to the same REST API from within its sandboxed Docker environment, using security validators and the OpenHands SDK to generate documentation safely.
 
-```
-Frontend (Next.js) :3001
-    | REST API (validated CORS)
-Backend (FastAPI) :8000
-    | Service Layer (Deep Modules)
-SQLite Database
-    - documents, versions, dependencies
-    - folder_metadata, users
-    - personal_folders, personal_document_refs
+```mermaid
+graph TD
+    FE["Frontend (Next.js) :3001"]
+    BE["Backend (FastAPI) :8000"]
+    DB["SQLite / PostgreSQL"]
+    AG["Doc Agent (Sandboxed Container)"]
 
-Doc Agent (Sandboxed Container)
-    - Security validators
-    - OpenHands SDK
-    - Hardened Docker
+    FE -- "REST API (validated CORS)" --> BE
+    BE -- "Service Layer" --> DB
+    AG -- "REST API" --> BE
+
+    subgraph Database
+        DB
+    end
+
+    subgraph Agent
+        AG
+    end
 ```
 
 ---
