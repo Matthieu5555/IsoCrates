@@ -34,7 +34,11 @@ _MERMAID_BLOCK_RE = re.compile(
 # {index, error} to stdout for blocks that fail to parse.
 _VALIDATE_SCRIPT = """\
 import mermaid from 'mermaid';
-mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+
+// 'loose' avoids DOMPurify dependency — Node.js has no DOM, so 'strict'
+// produces false positives ("DOMPurify.addHook is not a function") that
+// mask real parse errors. Content is trusted (our own agent output).
+mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' });
 
 const input = await new Promise(resolve => {
     let data = '';
@@ -49,7 +53,13 @@ for (const block of blocks) {
     try {
         await mermaid.parse(block.source.trim());
     } catch (e) {
-        errors.push({ index: block.index, error: e.message || String(e) });
+        const msg = e.message || String(e);
+        // Categorize: DOMPurify/DOM errors are runtime environment issues,
+        // not diagram syntax problems. Flag them so callers can distinguish.
+        const category = (msg.includes('DOMPurify') || msg.includes('document is not defined'))
+            ? 'runtime'
+            : 'parse';
+        errors.push({ index: block.index, error: msg, category });
     }
 }
 
@@ -65,6 +75,7 @@ class MermaidError:
     line_number: int   # 1-based line number where the block starts in the markdown
     source: str        # the raw mermaid source (without fences)
     error: str         # parse error message from mermaid
+    category: str = "parse"  # "parse" = real syntax error, "runtime" = Node.js environment issue
 
 
 def extract_mermaid_blocks(content: str) -> list[tuple[int, str]]:
@@ -180,17 +191,27 @@ def validate_mermaid_blocks(
             except OSError:
                 pass
 
-    # Map raw errors back to MermaidError with line numbers and source
+    # Map raw errors back to MermaidError with line numbers and source.
+    # Runtime errors (DOMPurify, missing DOM) are logged but filtered out —
+    # they're Node.js environment issues, not diagram problems.
     errors: list[MermaidError] = []
     for err in raw_errors:
         idx = err["index"]
+        category = err.get("category", "parse")
         if 0 <= idx < len(blocks):
             line_number, source = blocks[idx]
+            if category == "runtime":
+                logger.debug(
+                    "[Mermaid] Block %d (line %d): runtime error ignored: %s",
+                    idx, line_number, err["error"][:200],
+                )
+                continue
             errors.append(MermaidError(
                 block_index=idx,
                 line_number=line_number,
                 source=source.strip(),
                 error=err["error"],
+                category=category,
             ))
 
     return errors

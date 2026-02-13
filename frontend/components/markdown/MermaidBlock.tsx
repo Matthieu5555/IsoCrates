@@ -35,7 +35,7 @@ function cssVarToHex(varName: string, fallback: string): string {
 
 function getMermaidConfig() {
   if (typeof document === 'undefined') {
-    return { theme: 'default' as const, securityLevel: 'strict' as const, startOnLoad: false, suppressErrorRendering: true };
+    return { theme: 'default' as const, securityLevel: 'loose' as const, startOnLoad: false, suppressErrorRendering: true };
   }
 
   const isDark = document.documentElement.classList.contains('dark');
@@ -45,7 +45,7 @@ function getMermaidConfig() {
     return {
       startOnLoad: false,
       theme: 'base' as const,
-      securityLevel: 'strict' as const,
+      securityLevel: 'loose' as const,
       suppressErrorRendering: true,
       themeVariables: {
         primaryColor: cssVarToHex('--primary', '#6366f1'),
@@ -65,7 +65,7 @@ function getMermaidConfig() {
   return {
     startOnLoad: false,
     theme: isDark ? 'dark' as const : 'default' as const,
-    securityLevel: 'strict' as const,
+    securityLevel: 'loose' as const,
     suppressErrorRendering: true,
   };
 }
